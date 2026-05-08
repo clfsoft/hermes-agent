@@ -937,33 +937,28 @@ def resolve_anthropic_token() -> Optional[str]:
     Returns the token string or None.
     """
     creds = read_claude_code_credentials()
+    anthropic_token = os.getenv("ANTHROPIC_TOKEN", "").strip()
+    claude_code_oauth_token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+    anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
-    # 1. Hermes-managed OAuth/setup token env var
-    token = os.getenv("ANTHROPIC_TOKEN", "").strip()
-    if token:
-        preferred = _prefer_refreshable_claude_code_token(token, creds)
+    if anthropic_token:
+        preferred = _prefer_refreshable_claude_code_token(anthropic_token, creds)
         if preferred:
             return preferred
-        return token
+        return anthropic_token
 
-    # 2. CLAUDE_CODE_OAUTH_TOKEN (used by Claude Code for setup-tokens)
-    cc_token = os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
-    if cc_token:
-        preferred = _prefer_refreshable_claude_code_token(cc_token, creds)
+    if claude_code_oauth_token:
+        preferred = _prefer_refreshable_claude_code_token(claude_code_oauth_token, creds)
         if preferred:
             return preferred
-        return cc_token
+        return claude_code_oauth_token
 
-    # 3. Claude Code credential file
     resolved_claude_token = _resolve_claude_code_token_from_credentials(creds)
     if resolved_claude_token:
         return resolved_claude_token
 
-    # 4. Regular API key, or a legacy OAuth token saved in ANTHROPIC_API_KEY.
-    # This remains as a compatibility fallback for pre-migration Hermes configs.
-    api_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
-    if api_key:
-        return api_key
+    if anthropic_api_key:
+        return anthropic_api_key
 
     return None
 
@@ -1000,10 +995,12 @@ def run_oauth_setup_token() -> Optional[str]:
         return creds["accessToken"]
 
     # Check env vars that may have been set
-    for env_var in ("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_TOKEN"):
-        val = os.getenv(env_var, "").strip()
-        if val:
-            return val
+    claude_code_oauth = os.getenv("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
+    if claude_code_oauth:
+        return claude_code_oauth
+    anthropic_token = os.getenv("ANTHROPIC_TOKEN", "").strip()
+    if anthropic_token:
+        return anthropic_token
 
     return None
 
@@ -1053,33 +1050,27 @@ def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
 
     auth_url = f"https://claude.ai/oauth/authorize?{urlencode(params)}"
 
-    print()
-    print("Authorize Hermes with your Claude Pro/Max subscription.")
-    print()
-    print("╭─ Claude Pro/Max Authorization ────────────────────╮")
-    print("│                                                   │")
-    print("│  Open this link in your browser:                  │")
-    print("╰───────────────────────────────────────────────────╯")
-    print()
-    print(f"  {auth_url}")
-    print()
+    logger.info("Authorize Hermes with your Claude Pro/Max subscription.")
+    logger.info("╭─ Claude Pro/Max Authorization ────────────────────╮")
+    logger.info("│                                                   │")
+    logger.info("│  Open this link in your browser:                  │")
+    logger.info("╰───────────────────────────────────────────────────╯")
+    logger.info("  %s", auth_url)
 
     try:
         webbrowser.open(auth_url)
-        print("  (Browser opened automatically)")
+        logger.info("Browser opened automatically")
     except Exception:
         pass
 
-    print()
-    print("After authorizing, you'll see a code. Paste it below.")
-    print()
+    logger.info("After authorizing, you'll see a code. Paste it below.")
     try:
         auth_code = input("Authorization code: ").strip()
     except (KeyboardInterrupt, EOFError):
         return None
 
     if not auth_code:
-        print("No code entered.")
+        logger.warning("No code entered.")
         return None
 
     splits = auth_code.split("#")
@@ -1111,7 +1102,7 @@ def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
         with urllib.request.urlopen(req, timeout=15) as resp:
             result = json.loads(resp.read().decode())
     except Exception as e:
-        print(f"Token exchange failed: {e}")
+        logger.error("Token exchange failed: %s", e)
         return None
 
     access_token = result.get("access_token", "")
@@ -1119,7 +1110,7 @@ def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
     expires_in = result.get("expires_in", 3600)
 
     if not access_token:
-        print("No access token in response.")
+        logger.error("No access token in response.")
         return None
 
     expires_at_ms = int(time.time() * 1000) + (expires_in * 1000)

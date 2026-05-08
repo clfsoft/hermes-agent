@@ -5,9 +5,10 @@ import logging
 import os
 import stat
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Union
-from urllib.parse import urlparse
+from urllib.parse import urlparse as _urlparse
 
 import yaml
 
@@ -259,6 +260,7 @@ def normalize_proxy_env_vars() -> None:
 # ─── URL Parsing Helpers ──────────────────────────────────────────────────────
 
 
+@lru_cache(maxsize=64)
 def base_url_hostname(base_url: str) -> str:
     """Return the lowercased hostname for a base URL, or ``""`` if absent.
 
@@ -272,7 +274,7 @@ def base_url_hostname(base_url: str) -> str:
     raw = (base_url or "").strip()
     if not raw:
         return ""
-    parsed = urlparse(raw if "://" in raw else f"//{raw}")
+    parsed = _urlparse(raw if "://" in raw else f"//{raw}")
     return (parsed.hostname or "").lower().rstrip(".")
 
 

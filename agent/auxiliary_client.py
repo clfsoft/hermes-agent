@@ -829,13 +829,13 @@ def _maybe_wrap_anthropic(
         if _safe_isinstance(client_obj, GeminiNativeClient):
             return client_obj
     except ImportError:
-        pass
+        logger.debug("GeminiNativeClient import skipped")
     try:
         from agent.copilot_acp_client import CopilotACPClient
         if _safe_isinstance(client_obj, CopilotACPClient):
             return client_obj
     except ImportError:
-        pass
+        logger.debug("CopilotACPClient import skipped")
 
     # Explicit non-anthropic api_mode wins over URL heuristics.
     if api_mode and api_mode != "anthropic_messages":
@@ -936,9 +936,11 @@ def _resolve_nous_runtime_api(*, force_refresh: bool = False) -> Optional[tuple[
     try:
         from hermes_cli.auth import resolve_nous_runtime_credentials
 
+        _min_ttl = os.getenv("HERMES_NOUS_MIN_KEY_TTL_SECONDS", "1800")
+        _timeout = os.getenv("HERMES_NOUS_TIMEOUT_SECONDS", "15")
         creds = resolve_nous_runtime_credentials(
-            min_key_ttl_seconds=max(60, int(os.getenv("HERMES_NOUS_MIN_KEY_TTL_SECONDS", "1800"))),
-            timeout_seconds=float(os.getenv("HERMES_NOUS_TIMEOUT_SECONDS", "15")),
+            min_key_ttl_seconds=max(60, int(_min_ttl)),
+            timeout_seconds=float(_timeout),
             force_mint=force_refresh,
         )
     except Exception as exc:
@@ -1019,7 +1021,7 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
                 if not is_provider_explicitly_configured("anthropic"):
                     continue
             except ImportError:
-                pass
+                logger.debug("is_provider_explicitly_configured import skipped")
             return _try_anthropic()
 
         pool_present, entry = _select_pool_entry(provider_id)
@@ -1563,9 +1565,11 @@ def _refresh_provider_credentials(provider: str) -> bool:
         if normalized == "nous":
             from hermes_cli.auth import resolve_nous_runtime_credentials
 
+            _min_ttl = os.getenv("HERMES_NOUS_MIN_KEY_TTL_SECONDS", "1800")
+            _timeout = os.getenv("HERMES_NOUS_TIMEOUT_SECONDS", "15")
             creds = resolve_nous_runtime_credentials(
-                min_key_ttl_seconds=max(60, int(os.getenv("HERMES_NOUS_MIN_KEY_TTL_SECONDS", "1800"))),
-                timeout_seconds=float(os.getenv("HERMES_NOUS_TIMEOUT_SECONDS", "15")),
+                min_key_ttl_seconds=max(60, int(_min_ttl)),
+                timeout_seconds=float(_timeout),
                 force_mint=True,
             )
             if not str(creds.get("api_key", "") or "").strip():
@@ -1659,33 +1663,26 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
     runtime_api_key = runtime.get("api_key", "")
     runtime_api_mode = runtime.get("api_mode", "")
 
+    _cached_main_provider = runtime_provider or _read_main_provider()
     # ── Warn once if OPENAI_BASE_URL is set but config.yaml uses a named
     #    provider (not 'custom').  This catches the common "env poisoning"
     #    scenario where a user switches providers via `hermes model` but the
     #    old OPENAI_BASE_URL lingers in ~/.hermes/.env. ──
     if not _stale_base_url_warned:
         _env_base = os.getenv("OPENAI_BASE_URL", "").strip()
-        _cfg_provider = runtime_provider or _read_main_provider()
-        if (_env_base and _cfg_provider
-                and _cfg_provider != "custom"
-                and not _cfg_provider.startswith("custom:")):
+        if (_env_base and _cached_main_provider
+                and _cached_main_provider != "custom"
+                and not _cached_main_provider.startswith("custom:")):
             logger.warning(
                 "OPENAI_BASE_URL is set (%s) but model.provider is '%s'. "
                 "Auxiliary clients may route to the wrong endpoint. "
                 "Run: hermes model to reconfigure, or remove "
                 "OPENAI_BASE_URL from ~/.hermes/.env",
-                _env_base, _cfg_provider,
+                _env_base, _cached_main_provider,
             )
             _stale_base_url_warned = True
 
-    # ── Step 1: main provider + main model → use them directly ──
-    #
-    # This is the primary aux backend for every user.  "auto" means
-    # "use my main chat model for side tasks as well" — including users
-    # on aggregators (OpenRouter, Nous) who previously got routed to a
-    # cheap provider-side default.  Explicit per-task overrides set via
-    # config.yaml (auxiliary.<task>.provider) still win over this.
-    main_provider = runtime_provider or _read_main_provider()
+    main_provider = _cached_main_provider
     main_model = runtime_model or _read_main_model()
     if (main_provider and main_model
             and main_provider not in ("auto", "")):
@@ -2049,9 +2046,7 @@ def resolve_provider_client(
                 provider)
             return None, None
     except ImportError:
-        pass
-
-    # ── API-key providers from PROVIDER_REGISTRY ─────────────────────
+        logger.debug("named custom provider config import skipped")
     try:
         from hermes_cli.auth import (
             PROVIDER_REGISTRY,
@@ -2130,7 +2125,7 @@ def resolve_provider_client(
                         final_model)
                     client = CodexAuxiliaryClient(client, final_model)
             except ImportError:
-                pass
+                logger.debug("_should_use_copilot_responses_api import skipped")
 
         # Honor api_mode for any API-key provider (e.g. direct OpenAI with
         # codex-family models).  The copilot-specific wrapping above handles
@@ -2572,7 +2567,7 @@ def _refresh_nous_auxiliary_client(
             import asyncio as _aio
             current_loop = _aio.get_event_loop()
         except RuntimeError:
-            pass
+            logger.debug("no running event loop for async client conversion")
         client, final_model = _to_async_client(sync_client, final_model or "", is_vision=is_vision)
     else:
         client = sync_client
@@ -2749,7 +2744,7 @@ def _get_cached_client(
             import asyncio as _aio
             current_loop = _aio.get_event_loop()
         except RuntimeError:
-            pass
+            logger.debug("no running event loop for cached client lookup")
     runtime = _normalize_main_runtime(main_runtime)
     cache_key = _client_cache_key(
         provider,
@@ -2891,7 +2886,7 @@ def _get_task_timeout(task: str, default: float = _DEFAULT_AUX_TIMEOUT) -> float
         try:
             return float(raw)
         except (ValueError, TypeError):
-            pass
+            logger.debug("invalid timeout value %r", raw)
     return default
 
 

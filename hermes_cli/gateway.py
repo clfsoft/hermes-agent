@@ -6,12 +6,16 @@ Handles: hermes gateway [run|start|stop|restart|status|install|uninstall|setup]
 
 import asyncio
 import os
+import re
 import shutil
 import signal
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+_PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_PATH_KEY_RE = re.compile(r'(<key>PATH</key>\s*<string>)(.*?)(</string>)', re.S)
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
@@ -749,22 +753,19 @@ def _profile_suffix() -> str:
     Works correctly in Docker (HERMES_HOME=/opt/data) and standard deployments.
     """
     import hashlib
-    import re
     from hermes_constants import get_default_hermes_root
     home = get_hermes_home().resolve()
     default = get_default_hermes_root().resolve()
     if home == default:
         return ""
-    # Detect <root>/profiles/<name> pattern → use the profile name
     profiles_root = (default / "profiles").resolve()
     try:
         rel = home.relative_to(profiles_root)
         parts = rel.parts
-        if len(parts) == 1 and re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", parts[0]):
+        if len(parts) == 1 and _PROFILE_NAME_RE.match(parts[0]):
             return parts[0]
     except ValueError:
         pass
-    # Fallback: short hash for arbitrary HERMES_HOME paths
     return hashlib.sha256(str(home).encode()).hexdigest()[:8]
 
 
@@ -779,7 +780,6 @@ def _profile_arg(hermes_home: str | None = None) -> str:
             ``get_hermes_home()`` value. Should be passed when generating a
             service definition for a different user (e.g. system service).
     """
-    import re
     from hermes_constants import get_default_hermes_root
     home = Path(hermes_home or str(get_hermes_home())).resolve()
     default = get_default_hermes_root().resolve()
@@ -789,7 +789,7 @@ def _profile_arg(hermes_home: str | None = None) -> str:
     try:
         rel = home.relative_to(profiles_root)
         parts = rel.parts
-        if len(parts) == 1 and re.match(r"^[a-z0-9][a-z0-9_-]{0,63}$", parts[0]):
+        if len(parts) == 1 and _PROFILE_NAME_RE.match(parts[0]):
             return f"--profile {parts[0]}"
     except ValueError:
         pass
@@ -1250,7 +1250,10 @@ def _system_service_identity(run_as_user: str | None = None) -> tuple[str, str, 
     import grp
     import pwd
 
-    username = (run_as_user or os.getenv("SUDO_USER") or os.getenv("USER") or os.getenv("LOGNAME") or getpass.getuser()).strip()
+    _sudo_user = os.getenv("SUDO_USER")
+    _user = os.getenv("USER")
+    _logname = os.getenv("LOGNAME")
+    username = (run_as_user or _sudo_user or _user or _logname or getpass.getuser()).strip()
     if not username:
         raise ValueError("Could not determine which user the gateway service should run as")
     if username == "root" and not run_as_user:
@@ -1280,7 +1283,10 @@ def _read_systemd_user_from_unit(unit_path: Path) -> str | None:
 
 
 def _default_system_service_user() -> str | None:
-    for candidate in (os.getenv("SUDO_USER"), os.getenv("USER"), os.getenv("LOGNAME")):
+    _sudo_user = os.getenv("SUDO_USER")
+    _user = os.getenv("USER")
+    _logname = os.getenv("LOGNAME")
+    for candidate in (_sudo_user, _user, _logname):
         if candidate and candidate.strip() and candidate.strip() != "root":
             return candidate.strip()
     return None
@@ -1346,7 +1352,9 @@ def get_systemd_linger_status() -> tuple[bool | None, str]:
     if not shutil.which("loginctl"):
         return None, "loginctl not found"
 
-    username = os.getenv("USER") or os.getenv("LOGNAME")
+    _user = os.getenv("USER")
+    _logname = os.getenv("LOGNAME")
+    username = _user or _logname
     if not username:
         try:
             import pwd
@@ -1643,15 +1651,8 @@ def _normalize_launchd_plist_for_comparison(text: str) -> str:
     That makes raw text comparison unstable across shells, so ignore the PATH
     payload when deciding whether the installed plist is stale.
     """
-    import re
-
     normalized = _normalize_service_definition(text)
-    return re.sub(
-        r'(<key>PATH</key>\s*<string>)(.*?)(</string>)',
-        r'\1__HERMES_PATH__\3',
-        normalized,
-        flags=re.S,
-    )
+    return _PATH_KEY_RE.sub(r'\1__HERMES_PATH__\3', normalized)
 
 
 def systemd_unit_is_current(system: bool = False) -> bool:
