@@ -468,6 +468,13 @@ def _paths_overlap(left: Path, right: Path) -> bool:
 
 _SURROGATE_RE = re.compile(r'[\ud800-\udfff]')
 
+_THINK_TAG_RE = re.compile(r'<think>.*?</think>\s*', re.DOTALL)
+_NEWLINE_BEFORE_THINK_RE = re.compile(r'\n)\n+')
+_TRAILING_JSON_COMMA_RE = re.compile(r',\s*([}\]])')
+_V1_SLASH_RE = re.compile(r"/v1/?$")
+_CAMEL_TO_SNAKE_RE = re.compile(r"(?<!^)(?=[A-Z])")
+_MULTI_SPACE_RE = re.compile(r"\s+")
+
 
 
 
@@ -670,7 +677,7 @@ def _repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     # Attempt common JSON repairs
     fixed = raw_stripped
     # 1. Strip trailing commas before } or ]
-    fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
+    fixed = _TRAILING_JSON_COMMA_RE.sub(r'\1', fixed)
     # 2. Close unclosed structures
     open_curly = fixed.count('{') - fixed.count('}')
     open_bracket = fixed.count('[') - fixed.count(']')
@@ -2341,7 +2348,7 @@ class AIAgent:
             and isinstance(base_url, str)
             and base_url
         ):
-            base_url = re.sub(r"/v1/?$", "", base_url)
+            base_url = _V1_SLASH_RE.sub("", base_url)
 
         old_model = self.model
         old_provider = self.provider
@@ -4393,8 +4400,8 @@ class AIAgent:
         if not content:
             return content
         content = convert_scratchpad_to_think(content)
-        content = re.sub(r'\n+(<think>)', r'\n\1', content)
-        content = re.sub(r'(</think>)\n+', r'\1\n', content)
+        content = _NEWLINE_BEFORE_THINK_RE.sub(r'\n\1', content)
+        content = _NEWLINE_AFTER_THINK_RE.sub(r'\1\n', content)</think>)\n+', r'\1\n', content)
         return content.strip()
 
     def _save_session_log(self, messages: List[Dict[str, Any]] = None):
@@ -5481,7 +5488,7 @@ class AIAgent:
             return s.lower().replace("-", "_").replace(" ", "_")
 
         def _camel_snake(s: str) -> str:
-            return re.sub(r"(?<!^)(?=[A-Z])", "_", s).lower()
+            return _CAMEL_TO_SNAKE_RE.sub("_", s).lower()
 
         def _strip_tool_suffix(s: str) -> str | None:
             lc = s.lower()
@@ -6666,7 +6673,7 @@ class AIAgent:
     def _normalize_interim_visible_text(text: str) -> str:
         if not isinstance(text, str):
             return ""
-        return re.sub(r"\s+", " ", text).strip()
+        return _MULTI_SPACE_RE.sub(" ", text).strip()
 
     def _interim_content_was_streamed(self, content: str) -> bool:
         visible_content = self._normalize_interim_visible_text(
@@ -10216,7 +10223,7 @@ class AIAgent:
 
             if final_response:
                 if "<think>" in final_response:
-                    final_response = re.sub(r'<think>.*?</think>\s*', '', final_response, flags=re.DOTALL).strip()
+                    final_response = _THINK_TAG_RE.sub('', final_response).strip()
                 if final_response:
                     messages.append({"role": "assistant", "content": final_response})
                 else:
@@ -10259,7 +10266,7 @@ class AIAgent:
 
                 if final_response:
                     if "<think>" in final_response:
-                        final_response = re.sub(r'<think>.*?</think>\s*', '', final_response, flags=re.DOTALL).strip()
+                        final_response = _THINK_TAG_RE.sub('', final_response).strip()
                     if final_response:
                         messages.append({"role": "assistant", "content": final_response})
                     else:
