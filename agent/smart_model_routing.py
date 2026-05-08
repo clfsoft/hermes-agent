@@ -72,7 +72,7 @@ _COMPLEX_HINT_TOKENS = {
     "工具", "终端", "脚本", "备份", "恢复", "复盘", "优化", "可行性分析",
     "落地", "自动", "外部程序", "15分钟", "超时", "回滚",
 }
-_DEFAULT_ROUTE_MODES = {"simple": "light", "general": "light", "complex": "heavy"}
+_DEFAULT_ROUTE_MODES = {"simple": "light", "general": "medium", "complex": "heavy"}
 
 
 def _coerce_bool(value: Any, default: bool = False) -> bool:
@@ -121,7 +121,7 @@ def _resolve_route_modes(routing_config: Optional[Dict[str, Any]]) -> Dict[str, 
     resolved = dict(_DEFAULT_ROUTE_MODES)
     for key in ("simple", "general", "complex"):
         value = str(configured.get(key) or "").strip().lower()
-        if value in {"light", "heavy", "inherit"}:
+        if value in {"light", "medium", "heavy", "inherit"}:
             resolved[key] = value
     return resolved
 
@@ -342,15 +342,24 @@ def resolve_turn_toolsets(
 ) -> Optional[List[str]]:
     """Resolve the effective toolset list for a routed turn.
 
-    ``light``  => no tools at all (basic Q&A only)
-    ``heavy``  => full tool + MCP + skills access
-    ``inherit`` => keep the caller's configured toolsets unchanged
+    Task mode mapping:
+        ``light``    => no tools at all (basic Q&A only)
+        ``medium``   => core + meta tools only (web, terminal, file, planning)
+        ``heavy``    => full tool + MCP + skills access
+        ``inherit``  => keep the caller's configured toolsets unchanged
+
+    The ``medium`` mode uses tool tier definitions from ``toolsets.py``
+    to filter the resolved tool list down to core + meta tools, keeping
+    heavy tools (browser, vision, image_gen, tts, execute_code, etc.)
+    out of the context for simple/general turns.
     """
     mode = str((route or {}).get("task_mode") or "inherit").strip().lower()
     if mode == "light":
         return []
     if mode == "heavy":
         return ["all"]
+    if mode == "medium":
+        return ["core", "meta"]
     if default_toolsets is None:
         return None
     return list(default_toolsets)

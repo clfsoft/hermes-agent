@@ -469,7 +469,9 @@ def _paths_overlap(left: Path, right: Path) -> bool:
 _SURROGATE_RE = re.compile(r'[\ud800-\udfff]')
 
 _THINK_TAG_RE = re.compile(r'<think>.*?</think>\s*', re.DOTALL)
-_NEWLINE_BEFORE_THINK_RE = re.compile(r'\n)\n+')
+_NEWLINE_BEFORE_THINK_RE = re.compile(r'\n+(<thinking|<think|<reasoning|<REASONING_SCRATCHPAD|<thought)')
+_NEWLINE_AFTER_THINK_RE = re.compile(r'(</thinking>|</think>|</reasoning>|</REASONING_SCRATCHPAD>|</thought>)\n+')
+
 _TRAILING_JSON_COMMA_RE = re.compile(r',\s*([}\]])')
 _V1_SLASH_RE = re.compile(r"/v1/?$")
 _CAMEL_TO_SNAKE_RE = re.compile(r"(?<!^)(?=[A-Z])")
@@ -4412,7 +4414,7 @@ class AIAgent:
             return content
         content = convert_scratchpad_to_think(content)
         content = _NEWLINE_BEFORE_THINK_RE.sub(r'\n\1', content)
-        content = _NEWLINE_AFTER_THINK_RE.sub(r'\1\n', content)</think>)\n+', r'\1\n', content)
+        content = _NEWLINE_AFTER_THINK_RE.sub(r'\1\n', content)
         return content.strip()
 
     def _save_session_log(self, messages: List[Dict[str, Any]] = None):
