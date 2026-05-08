@@ -860,6 +860,8 @@ class GatewayRunner:
         self._pending_image_only_timers: Dict[str, asyncio.Task] = {}
         self._image_wait_flushing: set = set()
 
+        self._heartbeat_scheduler = None
+
         # Slash-confirm state lives in tools.slash_confirm (module-level),
         # so platform adapters can resolve callbacks without a backref to
         # this runner.  Keep a local counter for confirm_id generation so
@@ -4956,6 +4958,10 @@ class GatewayRunner:
         # Get or create session
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key
+
+        if self._heartbeat_scheduler:
+            self._heartbeat_scheduler.update_last_target(session_key, source.platform)
+
         if getattr(session_entry, "was_auto_reset", False):
             # Treat auto-reset as a full conversation boundary — drop every
             # session-scoped transient state so the fresh session does not
@@ -13084,6 +13090,15 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     )
     cron_thread.start()
 
+    # Start heartbeat scheduler (periodic agent turns for proactive checks)
+    try:
+        from gateway.heartbeat import HeartbeatScheduler
+        heartbeat_scheduler = HeartbeatScheduler(runner)
+        runner._heartbeat_scheduler = heartbeat_scheduler
+        heartbeat_scheduler.start()
+    except Exception as exc:
+        logger.debug("Heartbeat scheduler not started: %s", exc)
+
     maintenance_tasks: list[asyncio.Task] = []
     try:
         from gateway.maintenance import start_scheduler
@@ -13118,6 +13133,13 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     # Stop cron ticker cleanly
     cron_stop.set()
     cron_thread.join(timeout=5)
+
+    # Stop heartbeat scheduler cleanly
+    if runner._heartbeat_scheduler:
+        try:
+            runner._heartbeat_scheduler.stop()
+        except Exception:
+            pass
 
     for task in maintenance_tasks:
         task.cancel()
