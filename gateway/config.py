@@ -1121,7 +1121,8 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
     # Matrix
     matrix_token = os.getenv("MATRIX_ACCESS_TOKEN")
     matrix_homeserver = os.getenv("MATRIX_HOMESERVER", "")
-    if matrix_token or os.getenv("MATRIX_PASSWORD"):
+    matrix_password_raw = os.getenv("MATRIX_PASSWORD")
+    if matrix_token or matrix_password_raw:
         if not matrix_homeserver:
             logger.warning("MATRIX_ACCESS_TOKEN/MATRIX_PASSWORD set but MATRIX_HOMESERVER is missing")
         if Platform.MATRIX not in config.platforms:
@@ -1133,7 +1134,7 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
         matrix_user = os.getenv("MATRIX_USER_ID", "")
         if matrix_user:
             config.platforms[Platform.MATRIX].extra["user_id"] = matrix_user
-        matrix_password = os.getenv("MATRIX_PASSWORD", "")
+        matrix_password = matrix_password_raw or ""
         if matrix_password:
             config.platforms[Platform.MATRIX].extra["password"] = matrix_password
         matrix_e2ee = os.getenv("MATRIX_ENCRYPTION", "").lower() in ("true", "1", "yes")

@@ -475,7 +475,18 @@ _V1_SLASH_RE = re.compile(r"/v1/?$")
 _CAMEL_TO_SNAKE_RE = re.compile(r"(?<!^)(?=[A-Z])")
 _MULTI_SPACE_RE = re.compile(r"\s+")
 
-
+_BEDROCK_REGION_RE = re.compile(r"bedrock-runtime\.([a-z0-9-]+)\.")
+_THINK_BLOCK_CI_RE = re.compile(r'<think>.*?</think>', re.DOTALL | re.IGNORECASE)
+_THINKING_BLOCK_CI_RE = re.compile(r'<thinking>.*?</thinking>', re.DOTALL | re.IGNORECASE)
+_REASONING_BLOCK_CI_RE = re.compile(r'<reasoning>.*?</reasoning>', re.DOTALL | re.IGNORECASE)
+_REASONING_SCRATCHPAD_RE = re.compile(r'<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>', re.DOTALL | re.IGNORECASE)
+_THOUGHT_BLOCK_CI_RE = re.compile(r'<thought>.*?</thought>', re.DOTALL | re.IGNORECASE)
+_WHITESPACE_RE = re.compile(r"\s")
+_FUTURE_ACK_RE = re.compile(r"\b(i['\u2019]ll|i will|let me|i can do that|i can help with that)\b")
+_HTML_TITLE_RE = re.compile(r"<title[^>]*>([^<]+)</title>", re.IGNORECASE)
+_CF_RAY_ID_RE = re.compile(r"Cloudflare Ray ID:\s*<strong[^>]*>([^<]+)</strong>")
+_QUOTA_RESET_RE = re.compile(r"quotaResetDelay[:\s\"]+(\d+(?:\.\d+)?)(ms|s)", re.IGNORECASE)
+_THINK_FINDALL_RE = re.compile(r'<think>(.*?)</think>', re.DOTALL)
 
 
 def _sanitize_surrogates(text: str) -> str:
@@ -1388,7 +1399,7 @@ class AIAgent:
             _is_bedrock_anthropic = self.provider == "bedrock"
             if _is_bedrock_anthropic:
                 from agent.anthropic_adapter import build_anthropic_bedrock_client
-                _region_match = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
+                _region_match = _BEDROCK_REGION_RE.search(base_url or "")
                 _br_region = _region_match.group(1) if _region_match else "us-east-1"
                 self._bedrock_region = _br_region
                 self._anthropic_client = build_anthropic_bedrock_client(_br_region)
@@ -1429,7 +1440,7 @@ class AIAgent:
         elif self.api_mode == "bedrock_converse":
             # AWS Bedrock — uses boto3 directly, no OpenAI client needed.
             # Region is extracted from the base_url or defaults to us-east-1.
-            _region_match = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
+            _region_match = _BEDROCK_REGION_RE.search(base_url or "")
             self._bedrock_region = _region_match.group(1) if _region_match else "us-east-1"
             # Guardrail config — read from config.yaml at init time.
             self._bedrock_guardrail_config = None
@@ -3198,11 +3209,11 @@ class AIAgent:
         # 1. Closed tag pairs — case-insensitive for all variants so
         #    mixed-case tags (<THINK>, <Thinking>) don't slip through to
         #    the unterminated-tag pass and take trailing content with them.
-        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL | re.IGNORECASE)
-        content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL | re.IGNORECASE)
-        content = re.sub(r'<reasoning>.*?</reasoning>', '', content, flags=re.DOTALL | re.IGNORECASE)
-        content = re.sub(r'<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>', '', content, flags=re.DOTALL | re.IGNORECASE)
-        content = re.sub(r'<thought>.*?</thought>', '', content, flags=re.DOTALL | re.IGNORECASE)
+        content = _THINK_BLOCK_CI_RE.sub('', content)
+        content = _THINKING_BLOCK_CI_RE.sub('', content)
+        content = _REASONING_BLOCK_CI_RE.sub('', content)
+        content = _REASONING_SCRATCHPAD_RE.sub('', content)
+        content = _THOUGHT_BLOCK_CI_RE.sub('', content)
         # 1b. Tool-call XML blocks (openclaw/openclaw#67318). Handle the
         #     generic tag names first — they have no attribute gating since
         #     a literal <tool_call> in prose is already vanishingly rare.
@@ -3304,7 +3315,7 @@ class AIAgent:
         visible_text = self._strip_think_blocks(content).strip()
         if not visible_text:
             return False
-        if len(visible_text) < 20 or not re.search(r"\s", visible_text):
+        if len(visible_text) < 20 or not _WHITESPACE_RE.search(visible_text):
             return False
 
         return not self._has_natural_response_ending(visible_text)
@@ -3326,7 +3337,7 @@ class AIAgent:
             return False
 
         has_future_ack = bool(
-            re.search(r"\b(i['’]ll|i will|let me|i can do that|i can help with that)\b", assistant_text)
+            _FUTURE_ACK_RE.search(assistant_text)
         )
         if not has_future_ack:
             return False
@@ -4170,10 +4181,10 @@ class AIAgent:
 
         # Cloudflare / proxy HTML pages: grab the <title> for a clean summary
         if "<!DOCTYPE" in raw or "<html" in raw:
-            m = re.search(r"<title[^>]*>([^<]+)</title>", raw, re.IGNORECASE)
+            m = _HTML_TITLE_RE.search(raw)
             title = m.group(1).strip() if m else "HTML error page (title not found)"
             # Also grab Cloudflare Ray ID if present
-            ray = re.search(r"Cloudflare Ray ID:\s*<strong[^>]*>([^<]+)</strong>", raw)
+            ray = _CF_RAY_ID_RE.search(raw)
             ray_id = ray.group(1).strip() if ray else None
             status_code = getattr(error, "status_code", None)
             parts = []
@@ -4280,7 +4291,7 @@ class AIAgent:
         if "reset_at" not in context:
             message = context.get("message") or ""
             if isinstance(message, str):
-                delay_match = re.search(r"quotaResetDelay[:\s\"]+(\\d+(?:\\.\\d+)?)(ms|s)", message, re.IGNORECASE)
+                delay_match = _QUOTA_RESET_RE.search(message)
                 if delay_match:
                     value = float(delay_match.group(1))
                     seconds = value / 1000.0 if delay_match.group(2).lower() == "ms" else value
@@ -8618,7 +8629,7 @@ class AIAgent:
         # directly in the content rather than returning separate API fields).
         if not reasoning_text:
             content = assistant_message.content or ""
-            think_blocks = re.findall(r'<think>(.*?)</think>', content, flags=re.DOTALL)
+            think_blocks = _THINK_FINDALL_RE.findall(content)
             if think_blocks:
                 combined = "\n\n".join(b.strip() for b in think_blocks if b.strip())
                 reasoning_text = combined or None

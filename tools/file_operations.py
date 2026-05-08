@@ -45,6 +45,10 @@ logger = logging.getLogger(__name__)
 
 _HOME = str(Path.home())
 
+_USERNAME_RE = re.compile(r'[a-zA-Z0-9._-]+')
+_RG_MATCH_RE = re.compile(r'^([A-Za-z]:)?(.*?):(\d+):(.*)$')
+_RG_CONTEXT_RE = re.compile(r'^([A-Za-z]:)?(.*?)-(\d+)-(.*)$')
+
 WRITE_DENIED_PATHS = {
     os.path.realpath(p) for p in [
         os.path.join(_HOME, ".ssh", "authorized_keys"),
@@ -438,7 +442,7 @@ class ShellFileOperations(FileOperations):
                 rest = path[1:]  # strip leading ~
                 slash_idx = rest.find('/')
                 username = rest[:slash_idx] if slash_idx >= 0 else rest
-                if username and re.fullmatch(r'[a-zA-Z0-9._-]+', username):
+                if username and _USERNAME_RE.fullmatch(username):
                     # Only expand ~username (not the full path) to avoid shell
                     # injection via path suffixes like "~user/$(malicious)".
                     expand_result = self._exec(f"echo ~{username}")
@@ -1022,8 +1026,8 @@ class ShellFileOperations(FileOperations):
             # rg group seps:    "--"
             # Note: on Windows, paths contain drive letters (e.g. C:\path),
             # so naive split(":") breaks. Use regex to handle both platforms.
-            _match_re = re.compile(r'^([A-Za-z]:)?(.*?):(\d+):(.*)$')
-            _ctx_re = re.compile(r'^([A-Za-z]:)?(.*?)-(\d+)-(.*)$')
+            _match_re = _RG_MATCH_RE
+            _ctx_re = _RG_CONTEXT_RE
             matches = []
             for line in result.stdout.strip().split('\n'):
                 if not line or line == "--":
@@ -1121,8 +1125,8 @@ class ShellFileOperations(FileOperations):
             # grep group seps:    "--"
             # Note: on Windows, paths contain drive letters (e.g. C:\path),
             # so naive split(":") breaks. Use regex to handle both platforms.
-            _match_re = re.compile(r'^([A-Za-z]:)?(.*?):(\d+):(.*)$')
-            _ctx_re = re.compile(r'^([A-Za-z]:)?(.*?)-(\d+)-(.*)$')
+            _match_re = _RG_MATCH_RE
+            _ctx_re = _RG_CONTEXT_RE
             matches = []
             for line in result.stdout.strip().split('\n'):
                 if not line or line == "--":

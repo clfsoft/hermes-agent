@@ -315,7 +315,7 @@ def _iter_custom_providers(config: Optional[dict] = None):
         yield _normalize_custom_pool_name(name), entry
 
 
-def get_custom_provider_pool_key(base_url: str) -> Optional[str]:
+def get_custom_provider_pool_key(base_url: str, *, config: Optional[dict] = None) -> Optional[str]:
     """Look up the custom_providers list in config.yaml and return 'custom:<name>' for a matching base_url.
 
     Returns None if no match is found.
@@ -323,7 +323,7 @@ def get_custom_provider_pool_key(base_url: str) -> Optional[str]:
     if not base_url:
         return None
     normalized_url = base_url.strip().rstrip("/")
-    for norm_name, entry in _iter_custom_providers():
+    for norm_name, entry in _iter_custom_providers(config=config):
         entry_url = str(entry.get("base_url") or "").strip().rstrip("/")
         if entry_url and entry_url == normalized_url:
             return f"{CUSTOM_POOL_PREFIX}{norm_name}"
@@ -341,12 +341,12 @@ def list_custom_pool_providers() -> List[str]:
     )
 
 
-def _get_custom_provider_config(pool_key: str) -> Optional[Dict[str, Any]]:
+def _get_custom_provider_config(pool_key: str, *, config: Optional[dict] = None) -> Optional[Dict[str, Any]]:
     """Return the custom_providers config entry matching a pool key like 'custom:together.ai'."""
     if not pool_key.startswith(CUSTOM_POOL_PREFIX):
         return None
     suffix = pool_key[len(CUSTOM_POOL_PREFIX):]
-    for norm_name, entry in _iter_custom_providers():
+    for norm_name, entry in _iter_custom_providers(config=config):
         if norm_name == suffix:
             return entry
     return None
@@ -1510,9 +1510,9 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
     changed = False
     active_sources: Set[str] = set()
     is_suppressed = _get_suppression_checker()
+    config = _load_config_safe()
 
-    # Seed from the custom_providers config entry's api_key field
-    cp_config = _get_custom_provider_config(pool_key)
+    cp_config = _get_custom_provider_config(pool_key, config=config)
     if cp_config:
         api_key = str(cp_config.get("api_key") or "").strip()
         base_url = str(cp_config.get("base_url") or "").strip().rstrip("/")
@@ -1536,7 +1536,6 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
 
     # Seed from model.api_key if model.provider=='custom' and model.base_url matches
     try:
-        config = _load_config_safe()
         model_cfg = config.get("model") if config else None
         if isinstance(model_cfg, dict):
             model_provider = str(model_cfg.get("provider") or "").strip().lower()
@@ -1549,7 +1548,7 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
                     break
             if model_provider == "custom" and model_base_url and model_api_key:
                 # Check if this model's base_url matches our custom provider
-                matched_key = get_custom_provider_pool_key(model_base_url)
+                matched_key = get_custom_provider_pool_key(model_base_url, config=config)
                 if matched_key == pool_key:
                     source = "model_config"
                     changed |= _seed_source_if_allowed(

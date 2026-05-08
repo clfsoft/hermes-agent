@@ -683,16 +683,17 @@ Create a markdown summary that captures all key information in a well-organized,
 
     # Call the LLM with retry logic — keep retries low since summarization
     # is a nice-to-have; the caller falls back to truncated content on failure.
+    aux_client, effective_model, extra_body = _resolve_web_extract_auxiliary(model)
+    if aux_client is None or not effective_model:
+        logger.warning("No auxiliary model available for web content processing")
+        return None
+
     max_retries = 2
     retry_delay = 2
     last_error = None
 
     for attempt in range(max_retries):
         try:
-            aux_client, effective_model, extra_body = _resolve_web_extract_auxiliary(model)
-            if aux_client is None or not effective_model:
-                logger.warning("No auxiliary model available for web content processing")
-                return None
             call_kwargs = {
                 "task": "web_extract",
                 "model": effective_model,
@@ -882,6 +883,10 @@ Create a single, unified markdown summary."""
         return fallback
 
 
+_BASE64_IMAGE_PAREN_RE = re.compile(r'\(data:image/[^;]+;base64,[A-Za-z0-9+/=]+\)')
+_BASE64_IMAGE_RE = re.compile(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+')
+
+
 def clean_base64_images(text: str) -> str:
     """
     Remove base64 encoded images from text to reduce token count and clutter.
@@ -898,20 +903,8 @@ def clean_base64_images(text: str) -> str:
     Returns:
         Cleaned text with base64 images replaced with placeholders
     """
-    # Pattern to match base64 encoded images wrapped in parentheses
-    # Matches: (data:image/[type];base64,[base64-string])
-    base64_with_parens_pattern = r'\(data:image/[^;]+;base64,[A-Za-z0-9+/=]+\)'
-    
-    # Pattern to match base64 encoded images without parentheses
-    # Matches: data:image/[type];base64,[base64-string]
-    base64_pattern = r'data:image/[^;]+;base64,[A-Za-z0-9+/=]+'
-    
-    # Replace parentheses-wrapped images first
-    cleaned_text = re.sub(base64_with_parens_pattern, '[BASE64_IMAGE_REMOVED]', text)
-    
-    # Then replace any remaining non-parentheses images
-    cleaned_text = re.sub(base64_pattern, '[BASE64_IMAGE_REMOVED]', cleaned_text)
-    
+    cleaned_text = _BASE64_IMAGE_PAREN_RE.sub('[BASE64_IMAGE_REMOVED]', text)
+    cleaned_text = _BASE64_IMAGE_RE.sub('[BASE64_IMAGE_REMOVED]', cleaned_text)
     return cleaned_text
 
 
@@ -1418,8 +1411,9 @@ async def web_extract_tool(
         
         debug_call_data["pages_extracted"] = pages_extracted
         debug_call_data["original_response_size"] = len(json.dumps(response))
-        effective_model = model or _get_default_summarizer_model()
-        auxiliary_available = check_auxiliary_model()
+        _aux_client, _aux_model, _aux_extra_body = _resolve_web_extract_auxiliary(model)
+        effective_model = _aux_model
+        auxiliary_available = _aux_client is not None
         
         # Process each result with LLM if enabled
         if use_llm_processing and auxiliary_available:
@@ -1589,8 +1583,9 @@ async def web_crawl_tool(
     }
     
     try:
-        effective_model = model or _get_default_summarizer_model()
-        auxiliary_available = check_auxiliary_model()
+        _aux_client, _aux_model, _aux_extra_body = _resolve_web_extract_auxiliary(model)
+        effective_model = _aux_model
+        auxiliary_available = _aux_client is not None
         backend = _get_backend()
 
         # Tavily supports crawl via its /crawl endpoint

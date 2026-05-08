@@ -535,21 +535,24 @@ def _cpa_management_key_from_env() -> str:
         env_on_disk = {}
 
     # 1) Dedicated management keys (preferred).
+    _cpa_mgmt = os.getenv("CPA_MANAGEMENT_KEY", "").strip()
+    _cliproxy_mgmt = os.getenv("CLIPROXY_MANAGEMENT_KEY", "").strip()
+    _cpa_api = os.getenv("CLIPROXY_API_KEY", "").strip()
+    _cliproxy_api = os.getenv("CPA_API_KEY", "").strip()
     key = (
         str(env_on_disk.get("CPA_MANAGEMENT_KEY") or "").strip()
         or str(env_on_disk.get("CLIPROXY_MANAGEMENT_KEY") or "").strip()
-        or os.getenv("CPA_MANAGEMENT_KEY", "").strip()
-        or os.getenv("CLIPROXY_MANAGEMENT_KEY", "").strip()
+        or _cpa_mgmt
+        or _cliproxy_mgmt
     )
     if key:
         return key
 
-    # 2) Fall back to inference keys (many CPA deployments accept these).
     key = (
         str(env_on_disk.get("CLIPROXY_API_KEY") or "").strip()
         or str(env_on_disk.get("CPA_API_KEY") or "").strip()
-        or os.getenv("CLIPROXY_API_KEY", "").strip()
-        or os.getenv("CPA_API_KEY", "").strip()
+        or _cpa_api
+        or _cliproxy_api
     )
     if key:
         return key
@@ -1760,11 +1763,11 @@ def list_available_providers() -> list[dict[str, str]]:
     for alias, canonical in _PROVIDER_ALIASES.items():
         aliases_for.setdefault(canonical, []).append(alias)
 
+    _openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
     result = []
     for pid in provider_order:
         label = _PROVIDER_LABELS.get(pid, pid)
         alias_list = aliases_for.get(pid, [])
-        # Check if this provider has credentials available
         has_creds = False
         try:
             from hermes_cli.auth import get_auth_status, has_usable_secret
@@ -1772,7 +1775,7 @@ def list_available_providers() -> list[dict[str, str]]:
                 custom_base_url = _get_custom_base_url() or ""
                 has_creds = bool(custom_base_url.strip())
             elif pid == "openrouter":
-                has_creds = has_usable_secret(os.getenv("OPENROUTER_API_KEY", ""))
+                has_creds = has_usable_secret(_openrouter_key)
             else:
                 status = get_auth_status(pid)
                 has_creds = bool(status.get("logged_in") or status.get("configured"))
@@ -2390,11 +2393,13 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
     if normalized == "custom":
         base_url = _get_custom_base_url()
         if base_url:
-            # Try common API key env vars for custom endpoints
+            _custom_key = os.getenv("CUSTOM_API_KEY", "")
+            _openai_key = os.getenv("OPENAI_API_KEY", "")
+            _openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
             api_key = (
-                os.getenv("CUSTOM_API_KEY", "")
-                or os.getenv("OPENAI_API_KEY", "")
-                or os.getenv("OPENROUTER_API_KEY", "")
+                _custom_key
+                or _openai_key
+                or _openrouter_key
             )
             live = fetch_api_models(api_key, base_url)
             if live:
