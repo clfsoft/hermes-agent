@@ -856,6 +856,10 @@ class GatewayRunner:
         # Key: session_key, Value: True when a prompt is waiting for user input.
         self._update_prompt_pending: Dict[str, bool] = {}
 
+        self._pending_image_only_events: Dict[str, MessageEvent] = {}
+        self._pending_image_only_timers: Dict[str, asyncio.Task] = {}
+        self._image_wait_flushing: set = set()
+
         # Slash-confirm state lives in tools.slash_confirm (module-level),
         # so platform adapters can resolve callbacks without a backref to
         # this runner.  Keep a local counter for confirm_id generation so
@@ -3666,6 +3670,67 @@ class GatewayRunner:
 
         return "pair"
 
+    _IMAGE_WAIT_TEXT_SECONDS = float(os.getenv("HERMES_IMAGE_WAIT_TEXT_SECONDS", "30"))
+
+    def _is_image_only_event(self, event: MessageEvent) -> bool:
+        if not event.media_urls:
+            return False
+        has_image = any(
+            (mt or "").startswith("image/") for mt in (event.media_types or [])
+        )
+        if not has_image:
+            return False
+        text = (event.text or "").strip()
+        if text:
+            return False
+        if event.get_command():
+            return False
+        return True
+
+    def _merge_image_event_into(self, pending: MessageEvent, text_event: MessageEvent) -> MessageEvent:
+        merged_media = list(pending.media_urls or []) + list(text_event.media_urls or [])
+        merged_types = list(pending.media_types or []) + list(text_event.media_types or [])
+        text = (text_event.text or "").strip()
+        return dataclasses.replace(
+            pending,
+            text=text,
+            media_urls=merged_media,
+            media_types=merged_types,
+        )
+
+    async def _flush_pending_image_only(self, session_key: str) -> None:
+        await asyncio.sleep(self._IMAGE_WAIT_TEXT_SECONDS)
+        pending = self._pending_image_only_events.pop(session_key, None)
+        self._pending_image_only_timers.pop(session_key, None)
+        if pending is None:
+            return
+        if session_key in self._running_agents:
+            logger.info(
+                "Image-wait-text timeout for session %s — agent running, "
+                "queuing image as pending follow-up",
+                session_key,
+            )
+            adapter = self.adapters.get(pending.source.platform)
+            if adapter:
+                merge_pending_message_event(
+                    adapter._pending_messages, session_key, pending
+                )
+            return
+        logger.info(
+            "Image-wait-text timeout for session %s — processing image-only event",
+            session_key,
+        )
+        self._image_wait_flushing.add(session_key)
+        try:
+            await self._handle_message(pending)
+        except Exception as exc:
+            logger.warning(
+                "Failed to flush pending image-only event for %s: %s",
+                session_key, exc,
+            )
+        finally:
+            self._image_wait_flushing.discard(session_key)
+
     async def _handle_message(self, event: MessageEvent) -> Optional[str]:
         """
         Handle an incoming message from any platform.
@@ -3779,6 +3844,42 @@ class GatewayRunner:
         # Otherwise control/session commands like /new or /help get silently
         # consumed as update answers instead of being dispatched normally.
         _quick_key = self._session_key_for_source(source)
+
+        # ── Image-wait-text: hold image-only events until a text follow-up ──
+        # When a user sends an image without any text, stash the event and
+        # start a timeout.  If a text message arrives within the timeout,
+        # merge the image into the text event and process them together.
+        # If the timeout fires first, process the image with the standard
+        # IMAGE_ONLY_USER_MESSAGE placeholder.
+        #
+        # Only active when no agent is running for this session — if an
+        # agent IS running, photo follow-ups should go through the normal
+        # interrupt/queue path so they're processed after the current turn.
+        if self._IMAGE_WAIT_TEXT_SECONDS > 0 and _quick_key not in self._running_agents and _quick_key not in self._image_wait_flushing:
+            _pending_img = self._pending_image_only_events.pop(_quick_key, None)
+            _old_timer = self._pending_image_only_timers.pop(_quick_key, None)
+            if _old_timer and not _old_timer.done():
+                _old_timer.cancel()
+
+            if self._is_image_only_event(event):
+                self._pending_image_only_events[_quick_key] = event
+                self._pending_image_only_timers[_quick_key] = asyncio.create_task(
+                    self._flush_pending_image_only(_quick_key)
+                )
+                logger.info(
+                    "Image-wait-text: stashing image-only event for session %s "
+                    "(timeout=%.0fs)",
+                    _quick_key, self._IMAGE_WAIT_TEXT_SECONDS,
+                )
+                return None
+
+            if _pending_img is not None:
+                event = self._merge_image_event_into(_pending_img, event)
+                logger.info(
+                    "Image-wait-text: merged pending image with text for session %s",
+                    _quick_key,
+                )
+
         _update_prompts = getattr(self, "_update_prompt_pending", {})
         if _update_prompts.get(_quick_key):
             raw = (event.text or "").strip()
@@ -10102,6 +10203,19 @@ class GatewayRunner:
         update_prompt_pending = getattr(self, "_update_prompt_pending", None)
         if isinstance(update_prompt_pending, dict):
             update_prompt_pending.pop(session_key, None)
+
+        pending_image_event = getattr(self, "_pending_image_only_events", None)
+        if isinstance(pending_image_event, dict):
+            pending_image_event.pop(session_key, None)
+        pending_image_timer = getattr(self, "_pending_image_only_timers", None)
+        if isinstance(pending_image_timer, dict):
+            _old_timer = pending_image_timer.pop(session_key, None)
+            if _old_timer and not _old_timer.done():
+                _old_timer.cancel()
+
+        image_wait_flushing = getattr(self, "_image_wait_flushing", None)
+        if isinstance(image_wait_flushing, set):
+            image_wait_flushing.discard(session_key)
 
         try:
             from tools.approval import clear_session as _clear_approval_session
