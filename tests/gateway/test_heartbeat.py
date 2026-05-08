@@ -3,6 +3,7 @@ import os
 import sys
 import types
 import pytest
+import time
 from unittest.mock import MagicMock, patch, PropertyMock
 from pathlib import Path
 
@@ -12,6 +13,8 @@ from gateway.heartbeat import (
     load_heartbeat_md,
     is_heartbeat_ok_response,
     HeartbeatScheduler,
+    _HeartbeatConfig,
+    _HeartbeatMdCache,
 )
 
 
@@ -53,15 +56,6 @@ class TestIsWithinActiveHours:
         assert _is_within_active_hours("", "") is True
         assert _is_within_active_hours(None, "18:00") is True
         assert _is_within_active_hours("08:00", None) is True
-
-    @patch("gateway.heartbeat._is_within_active_hours")
-    def test_within_range(self, mock_check):
-        from datetime import datetime
-        now = datetime.now()
-        current_minutes = now.hour * 60 + now.minute
-        start = f"{now.hour:02d}:00"
-        end = f"{(now.hour + 1) % 24:02d}:00"
-        assert _is_within_active_hours.__wrapped__(start, end) if hasattr(_is_within_active_hours, '__wrapped__') else True
 
     def test_invalid_format_returns_true(self):
         assert _is_within_active_hours("abc", "xyz") is True
@@ -119,6 +113,78 @@ class TestIsHeartbeatOkResponse:
         assert is_heartbeat_ok_response("HEARTBEAT_OK\n" + "x" * 150, ack_max_chars=100) is False
 
 
+class TestHeartbeatConfig:
+    def test_refresh_caches_config(self):
+        cfg = _HeartbeatConfig()
+        with patch("hermes_cli.config.load_config", return_value={"heartbeat": {"every": "1h"}}):
+            cfg.refresh()
+            assert cfg._interval == 3600.0
+            ts = cfg._ts
+            with patch("hermes_cli.config.load_config", return_value={"heartbeat": {"every": "2h"}}) as mock_lc:
+                cfg.refresh()
+                mock_lc.assert_not_called()
+                assert cfg._interval == 3600.0
+
+    def test_refresh_rereads_after_ttl(self):
+        cfg = _HeartbeatConfig()
+        with patch("hermes_cli.config.load_config", return_value={"heartbeat": {"every": "1h"}}):
+            cfg.refresh()
+        cfg._ts = time.monotonic() - 61.0
+        with patch("hermes_cli.config.load_config", return_value={"heartbeat": {"every": "2h"}}):
+            cfg.refresh()
+            assert cfg._interval == 7200.0
+
+    def test_env_overrides(self):
+        cfg = _HeartbeatConfig()
+        with patch.dict(os.environ, {"HERMES_HEARTBEAT_EVERY": "30m", "HERMES_HEARTBEAT_TARGET": "last"}):
+            with patch("hermes_cli.config.load_config", side_effect=Exception("no config")):
+                cfg.refresh()
+                assert cfg._interval == 1800.0
+                assert cfg._target == "last"
+
+    def test_light_context_default_true(self):
+        cfg = _HeartbeatConfig()
+        with patch("hermes_cli.config.load_config", side_effect=Exception("no config")):
+            cfg.refresh()
+            assert cfg._light_context is True
+
+    def test_light_context_env_false(self):
+        cfg = _HeartbeatConfig()
+        with patch.dict(os.environ, {"HERMES_HEARTBEAT_LIGHT_CONTEXT": "false"}):
+            with patch("hermes_cli.config.load_config", side_effect=Exception("no config")):
+                cfg.refresh()
+                assert cfg._light_context is False
+
+
+class TestHeartbeatMdCache:
+    def test_returns_none_for_missing_file(self, tmp_path):
+        cache = _HeartbeatMdCache()
+        with patch("gateway.heartbeat.get_hermes_home", return_value=tmp_path):
+            assert cache.get() is None
+
+    def test_caches_content(self, tmp_path):
+        (tmp_path / "HEARTBEAT.md").write_text("# HB\n- task1\n")
+        cache = _HeartbeatMdCache()
+        with patch("gateway.heartbeat.get_hermes_home", return_value=tmp_path):
+            result1 = cache.get()
+            assert result1 is not None
+            result2 = cache.get()
+            assert result1 is result2
+
+    def test_invalidates_on_mtime_change(self, tmp_path):
+        md = tmp_path / "HEARTBEAT.md"
+        md.write_text("# HB\n- task1\n")
+        cache = _HeartbeatMdCache()
+        with patch("gateway.heartbeat.get_hermes_home", return_value=tmp_path):
+            result1 = cache.get()
+            assert "task1" in result1
+            md.write_text("# HB\n- task2\n")
+            import os
+            os.utime(str(md), (time.time() + 1, time.time() + 1))
+            result2 = cache.get()
+            assert "task2" in result2
+
+
 class TestHeartbeatScheduler:
     def _make_runner(self):
         runner = MagicMock()
@@ -146,119 +212,143 @@ class TestHeartbeatScheduler:
     def test_resolve_target_none(self):
         runner = self._make_runner()
         scheduler = HeartbeatScheduler(runner)
-        with patch.object(type(scheduler), "_target", new_callable=PropertyMock, return_value="none"):
-            session_key, platform = scheduler._resolve_target_session()
-            assert session_key is None
-            assert platform is None
+        scheduler._cfg._target = "none"
+        session_key, platform = scheduler._resolve_target_session()
+        assert session_key is None
+        assert platform is None
 
     def test_resolve_target_last(self):
         runner = self._make_runner()
         scheduler = HeartbeatScheduler(runner)
         scheduler.update_last_target("session_last", "weixin")
-        with patch.object(type(scheduler), "_target", new_callable=PropertyMock, return_value="last"):
-            session_key, platform = scheduler._resolve_target_session()
-            assert session_key == "session_last"
-            assert platform == "weixin"
+        scheduler._cfg._target = "last"
+        session_key, platform = scheduler._resolve_target_session()
+        assert session_key == "session_last"
+        assert platform == "weixin"
 
     def test_resolve_target_last_no_previous(self):
         runner = self._make_runner()
         scheduler = HeartbeatScheduler(runner)
-        with patch.object(type(scheduler), "_target", new_callable=PropertyMock, return_value="last"):
-            session_key, platform = scheduler._resolve_target_session()
-            assert session_key is None
-            assert platform is None
+        scheduler._cfg._target = "last"
+        session_key, platform = scheduler._resolve_target_session()
+        assert session_key is None
+        assert platform is None
 
     def test_start_does_nothing_when_interval_zero(self):
         runner = self._make_runner()
         scheduler = HeartbeatScheduler(runner)
-        with patch.object(type(scheduler), "_interval", new_callable=PropertyMock, return_value=0.0):
-            scheduler.start()
-            assert scheduler._thread is None
+        scheduler._cfg._interval = 0.0
+        scheduler._cfg._ts = time.monotonic()
+        scheduler.start()
+        assert scheduler._thread is None
 
     def test_start_creates_thread(self):
         runner = self._make_runner()
         scheduler = HeartbeatScheduler(runner)
-        with patch.object(type(scheduler), "_interval", new_callable=PropertyMock, return_value=3600.0):
-            scheduler.start()
-            assert scheduler._thread is not None
-            assert scheduler._thread.is_alive()
-            scheduler.stop()
+        scheduler._cfg._interval = 3600.0
+        scheduler._cfg._target = "none"
+        scheduler._cfg._light_context = True
+        scheduler._cfg._ts = time.monotonic()
+        scheduler.start()
+        assert scheduler._thread is not None
+        assert scheduler._thread.is_alive()
+        scheduler.stop()
 
     def test_stop_sets_event(self):
         runner = self._make_runner()
         scheduler = HeartbeatScheduler(runner)
-        with patch.object(type(scheduler), "_interval", new_callable=PropertyMock, return_value=3600.0):
-            scheduler.start()
-            scheduler.stop()
-            assert scheduler._stop_event.is_set()
+        scheduler._cfg._interval = 3600.0
+        scheduler._cfg._target = "none"
+        scheduler._cfg._light_context = True
+        scheduler._cfg._ts = time.monotonic()
+        scheduler.start()
+        scheduler.stop()
+        assert scheduler._stop_event.is_set()
 
     def test_tick_skips_outside_active_hours(self):
         runner = self._make_runner()
         scheduler = HeartbeatScheduler(runner)
+        scheduler._cfg._active_hours_start = "09:00"
+        scheduler._cfg._active_hours_end = "18:00"
+        scheduler._cfg._ts = time.monotonic()
         with patch("gateway.heartbeat._is_within_active_hours", return_value=False):
-            with patch.object(type(scheduler), "_active_hours_start", new_callable=PropertyMock, return_value="09:00"):
-                with patch.object(type(scheduler), "_active_hours_end", new_callable=PropertyMock, return_value="18:00"):
-                    scheduler._tick()
+            scheduler._tick()
 
     def test_tick_skips_when_no_heartbeat_md_and_light_context(self):
         runner = self._make_runner()
         scheduler = HeartbeatScheduler(runner)
+        self.scheduler = scheduler
+        scheduler._cfg._light_context = True
+        scheduler._cfg._ts = time.monotonic()
+        self._set_md_cache(None)
         with patch("gateway.heartbeat._is_within_active_hours", return_value=True):
-            with patch("gateway.heartbeat.load_heartbeat_md", return_value=None):
-                with patch.object(type(scheduler), "_light_context", new_callable=PropertyMock, return_value=True):
-                    scheduler._tick()
+            scheduler._tick()
 
     def test_tick_skips_when_no_target_session(self):
         runner = self._make_runner()
         scheduler = HeartbeatScheduler(runner)
+        self.scheduler = scheduler
+        scheduler._cfg._light_context = True
+        scheduler._cfg._target = "none"
+        scheduler._cfg._ts = time.monotonic()
+        self._set_md_cache("checklist")
         with patch("gateway.heartbeat._is_within_active_hours", return_value=True):
-            with patch("gateway.heartbeat.load_heartbeat_md", return_value="checklist"):
-                with patch.object(type(scheduler), "_light_context", new_callable=PropertyMock, return_value=True):
-                    with patch.object(type(scheduler), "_target", new_callable=PropertyMock, return_value="none"):
-                        scheduler._tick()
+            scheduler._tick()
 
     def test_tick_skips_when_agent_running(self):
         runner = self._make_runner()
         runner._running_agents = {"session_1": object()}
         scheduler = HeartbeatScheduler(runner)
+        self.scheduler = scheduler
         scheduler.update_last_target("session_1", "weixin")
+        scheduler._cfg._light_context = True
+        scheduler._cfg._target = "last"
+        scheduler._cfg._ts = time.monotonic()
+        self._set_md_cache("checklist")
         with patch("gateway.heartbeat._is_within_active_hours", return_value=True):
-            with patch("gateway.heartbeat.load_heartbeat_md", return_value="checklist"):
-                with patch.object(type(scheduler), "_light_context", new_callable=PropertyMock, return_value=True):
-                    with patch.object(type(scheduler), "_target", new_callable=PropertyMock, return_value="last"):
-                        scheduler._tick()
+            scheduler._tick()
+
+    def _set_md_cache(self, content):
+        mock_cache = MagicMock()
+        mock_cache.get.return_value = content
+        self.scheduler._md_cache = mock_cache
 
     def test_tick_runs_heartbeat_agent(self):
         runner = self._make_runner()
         scheduler = HeartbeatScheduler(runner)
+        self.scheduler = scheduler
         scheduler.update_last_target("session_1", "weixin")
+        scheduler._cfg._light_context = True
+        scheduler._cfg._target = "last"
+        scheduler._cfg._prompt = "check"
+        scheduler._cfg._ts = time.monotonic()
+        self._set_md_cache("checklist")
         with patch("gateway.heartbeat._is_within_active_hours", return_value=True):
-            with patch("gateway.heartbeat.load_heartbeat_md", return_value="checklist"):
-                with patch.object(type(scheduler), "_light_context", new_callable=PropertyMock, return_value=True):
-                    with patch.object(type(scheduler), "_target", new_callable=PropertyMock, return_value="last"):
-                        with patch.object(type(scheduler), "_prompt", new_callable=PropertyMock, return_value="check"):
-                            with patch.object(scheduler, "_run_heartbeat_agent") as mock_run:
-                                scheduler._tick()
-                                mock_run.assert_called_once()
+            with patch.object(scheduler, "_run_heartbeat_agent") as mock_run:
+                scheduler._tick()
+                mock_run.assert_called_once()
 
     def test_run_heartbeat_agent_ok_response(self):
         runner = self._make_runner()
         scheduler = HeartbeatScheduler(runner)
+        scheduler._cfg._light_context = True
+        scheduler._cfg._ack_max_chars = 300
         mock_agent = MagicMock()
         mock_agent.run_conversation.return_value = {"final_response": "HEARTBEAT_OK"}
         mock_run_agent = types.ModuleType("run_agent")
         mock_run_agent.AIAgent = MagicMock(return_value=mock_agent)
         with patch.dict(sys.modules, {"run_agent": mock_run_agent}):
-            with patch.object(type(scheduler), "_light_context", new_callable=PropertyMock, return_value=True):
-                with patch.object(type(scheduler), "_ack_max_chars", new_callable=PropertyMock, return_value=300):
-                    with patch("hermes_cli.config.load_config", return_value={}):
-                        with patch("hermes_cli.config.resolve_agent_turn_limits", return_value={}):
-                            scheduler._run_heartbeat_agent("check", "session_1", "weixin", "checklist")
+            with patch("hermes_cli.config.load_config", return_value={}):
+                with patch("hermes_cli.config.resolve_agent_turn_limits", return_value={}):
+                    scheduler._run_heartbeat_agent("check", "session_1", "weixin", "checklist")
         mock_agent.run_conversation.assert_called_once_with("check")
 
     def test_run_heartbeat_agent_delivers_non_ok(self):
         runner = self._make_runner()
         scheduler = HeartbeatScheduler(runner)
+        scheduler._cfg._light_context = True
+        scheduler._cfg._ack_max_chars = 300
+        scheduler._cfg._target = "last"
         mock_agent = MagicMock()
         mock_agent.run_conversation.return_value = {"final_response": "You have 3 unread emails!"}
         mock_adapter = MagicMock()
@@ -266,32 +356,27 @@ class TestHeartbeatScheduler:
         mock_run_agent = types.ModuleType("run_agent")
         mock_run_agent.AIAgent = MagicMock(return_value=mock_agent)
         with patch.dict(sys.modules, {"run_agent": mock_run_agent}):
-            with patch.object(type(scheduler), "_light_context", new_callable=PropertyMock, return_value=True):
-                with patch.object(type(scheduler), "_ack_max_chars", new_callable=PropertyMock, return_value=300):
-                    with patch.object(type(scheduler), "_target", new_callable=PropertyMock, return_value="last"):
-                        with patch("hermes_cli.config.load_config", return_value={}):
-                            with patch("hermes_cli.config.resolve_agent_turn_limits", return_value={}):
-                                with patch.object(scheduler, "_deliver_heartbeat_response") as mock_deliver:
-                                    scheduler._run_heartbeat_agent("check", "session_1", "weixin", "checklist")
-                                    mock_deliver.assert_called_once_with("You have 3 unread emails!", "session_1", "weixin")
+            with patch("hermes_cli.config.load_config", return_value={}):
+                with patch("hermes_cli.config.resolve_agent_turn_limits", return_value={}):
+                    with patch.object(scheduler, "_deliver_heartbeat_response") as mock_deliver:
+                        scheduler._run_heartbeat_agent("check", "session_1", "weixin", "checklist")
+                        mock_deliver.assert_called_once_with("You have 3 unread emails!", "session_1", "weixin")
 
-    def test_interval_from_env(self):
+    def test_run_heartbeat_agent_max_iterations_is_3(self):
         runner = self._make_runner()
         scheduler = HeartbeatScheduler(runner)
-        with patch.dict(os.environ, {"HERMES_HEARTBEAT_EVERY": "1h"}):
-            with patch("hermes_cli.config.load_config", side_effect=Exception("no config")):
-                assert scheduler._interval == 3600.0
-
-    def test_target_from_env(self):
-        runner = self._make_runner()
-        scheduler = HeartbeatScheduler(runner)
-        with patch.dict(os.environ, {"HERMES_HEARTBEAT_TARGET": "last"}):
-            with patch("hermes_cli.config.load_config", side_effect=Exception("no config")):
-                assert scheduler._target == "last"
-
-    def test_light_context_from_env(self):
-        runner = self._make_runner()
-        scheduler = HeartbeatScheduler(runner)
-        with patch.dict(os.environ, {"HERMES_HEARTBEAT_LIGHT_CONTEXT": "false"}):
-            with patch("hermes_cli.config.load_config", side_effect=Exception("no config")):
-                assert scheduler._light_context is False
+        scheduler._cfg._light_context = True
+        scheduler._cfg._ack_max_chars = 300
+        scheduler._cfg._target = "none"
+        mock_agent_cls = MagicMock()
+        mock_agent = MagicMock()
+        mock_agent.run_conversation.return_value = {"final_response": "HEARTBEAT_OK"}
+        mock_agent_cls.return_value = mock_agent
+        mock_run_agent = types.ModuleType("run_agent")
+        mock_run_agent.AIAgent = mock_agent_cls
+        with patch.dict(sys.modules, {"run_agent": mock_run_agent}):
+            with patch("hermes_cli.config.load_config", return_value={}):
+                with patch("hermes_cli.config.resolve_agent_turn_limits", return_value={}):
+                    scheduler._run_heartbeat_agent("check", "session_1", "weixin", "checklist")
+        _, kwargs = mock_agent_cls.call_args
+        assert kwargs["max_iterations"] == 3

@@ -25,6 +25,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +34,9 @@ from hermes_constants import get_hermes_home
 logger = logging.getLogger(__name__)
 
 _HEARTBEAT_OK_RE = re.compile(r"\bHEARTBEAT_OK\b")
+_INTERVAL_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(h|m|s)?")
+_DISABLE_VALUES = frozenset({"0m", "0", "0s", "0h", "off", "disable", "disabled"})
+_TRUTHY_VALUES = frozenset({"true", "1", "yes"})
 
 _DEFAULT_PROMPT = (
     "Read HEARTBEAT.md if it exists (workspace context). "
@@ -40,14 +44,17 @@ _DEFAULT_PROMPT = (
     "If nothing needs attention, reply HEARTBEAT_OK."
 )
 
+_CONFIG_TTL = 60.0
+
 
 def _parse_interval(value: str) -> float:
-    """Parse a human-readable interval like '30m', '1h', '2h30m' into seconds."""
-    if not value or value.strip().lower() in ("0m", "0", "0s", "0h", "off", "disable", "disabled"):
+    if not value:
         return 0.0
-    value = value.strip().lower()
+    stripped = value.strip().lower()
+    if stripped in _DISABLE_VALUES:
+        return 0.0
     total = 0.0
-    for match in re.finditer(r"(\d+(?:\.\d+)?)\s*(h|m|s)?", value):
+    for match in _INTERVAL_RE.finditer(stripped):
         num = float(match.group(1))
         unit = (match.group(2) or "m").lower()
         if unit == "h":
@@ -60,28 +67,24 @@ def _parse_interval(value: str) -> float:
 
 
 def _is_within_active_hours(start_str: Optional[str], end_str: Optional[str]) -> bool:
-    """Check if the current local time is within the active hours window."""
     if not start_str or not end_str:
         return True
     try:
-        from datetime import datetime
         now = datetime.now()
         current_minutes = now.hour * 60 + now.minute
-        parts = start_str.strip().split(":")
-        start_minutes = int(parts[0]) * 60 + int(parts[1])
-        parts = end_str.strip().split(":")
-        end_minutes = int(parts[0]) * 60 + int(parts[1])
+        sp = start_str.strip().split(":", 1)
+        ep = end_str.strip().split(":", 1)
+        start_minutes = int(sp[0]) * 60 + int(sp[1])
+        end_minutes = int(ep[0]) * 60 + int(ep[1])
         if start_minutes <= end_minutes:
             return start_minutes <= current_minutes < end_minutes
-        else:
-            return current_minutes >= start_minutes or current_minutes < end_minutes
+        return current_minutes >= start_minutes or current_minutes < end_minutes
     except Exception as exc:
         logger.debug("active-hours parse error: %s", exc)
         return True
 
 
 def load_heartbeat_md() -> Optional[str]:
-    """Load HEARTBEAT.md from HERMES_HOME. Returns None if missing or empty."""
     try:
         path = get_hermes_home() / "HEARTBEAT.md"
         if not path.exists():
@@ -89,29 +92,136 @@ def load_heartbeat_md() -> Optional[str]:
         content = path.read_text(encoding="utf-8").strip()
         if not content:
             return None
-        lines = [l for l in content.splitlines() if l.strip() and not l.strip().startswith("#")]
-        if not lines:
-            return None
-        return content
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                return content
+        return None
     except Exception as exc:
         logger.debug("Could not load HEARTBEAT.md: %s", exc)
         return None
 
 
 def is_heartbeat_ok_response(text: str, ack_max_chars: int = 300) -> bool:
-    """Check if a heartbeat response is a silent ack (HEARTBEAT_OK).
-
-    HEARTBEAT_OK at the start or end of the reply is treated as an ack.
-    The token is stripped and the reply is dropped if the remaining
-    content is <= ack_max_chars.
-    """
     if not text:
         return True
     if _HEARTBEAT_OK_RE.search(text):
         stripped = _HEARTBEAT_OK_RE.sub("", text).strip()
-        if len(stripped) <= ack_max_chars:
-            return True
+        return len(stripped) <= ack_max_chars
     return False
+
+
+class _HeartbeatConfig:
+    """Cached heartbeat configuration — reads config.yaml once per TTL."""
+
+    __slots__ = (
+        "_interval", "_target", "_prompt", "_light_context",
+        "_ack_max_chars", "_active_hours_start", "_active_hours_end",
+        "_model", "_ts",
+    )
+
+    def __init__(self):
+        self._ts = 0.0
+        self._interval: float = 0.0
+        self._target: str = "none"
+        self._prompt: str = _DEFAULT_PROMPT
+        self._light_context: bool = True
+        self._ack_max_chars: int = 300
+        self._active_hours_start: Optional[str] = None
+        self._active_hours_end: Optional[str] = None
+        self._model: str = ""
+
+    def refresh(self):
+        now = time.monotonic()
+        if now - self._ts < _CONFIG_TTL:
+            return
+        self._ts = now
+
+        hb_cfg: dict = {}
+        try:
+            from hermes_cli.config import load_config
+            cfg = load_config()
+            hb_cfg = cfg.get("heartbeat") or {}
+            if not isinstance(hb_cfg, dict):
+                hb_cfg = {}
+        except Exception:
+            pass
+
+        raw_every = os.getenv("HERMES_HEARTBEAT_EVERY", "0m").strip()
+        cfg_every = hb_cfg.get("every")
+        if cfg_every:
+            raw_every = str(cfg_every)
+        self._interval = _parse_interval(raw_every)
+
+        raw_target = os.getenv("HERMES_HEARTBEAT_TARGET", "none").strip().lower()
+        cfg_target = hb_cfg.get("target")
+        if cfg_target:
+            raw_target = str(cfg_target).lower()
+        self._target = raw_target
+
+        raw_prompt = os.getenv("HERMES_HEARTBEAT_PROMPT", "").strip()
+        cfg_prompt = hb_cfg.get("prompt", "")
+        self._prompt = raw_prompt or str(cfg_prompt) if cfg_prompt else _DEFAULT_PROMPT
+
+        raw_lc = os.getenv("HERMES_HEARTBEAT_LIGHT_CONTEXT", "true").strip().lower()
+        cfg_lc = hb_cfg.get("lightContext")
+        if cfg_lc is not None:
+            self._light_context = bool(cfg_lc)
+        else:
+            self._light_context = raw_lc in _TRUTHY_VALUES
+
+        try:
+            self._ack_max_chars = int(os.getenv("HERMES_HEARTBEAT_ACK_MAX_CHARS", "300").strip())
+        except (ValueError, TypeError):
+            self._ack_max_chars = 300
+
+        raw_start = os.getenv("HERMES_HEARTBEAT_ACTIVE_HOURS_START", "").strip()
+        raw_end = os.getenv("HERMES_HEARTBEAT_ACTIVE_HOURS_END", "").strip()
+        ah = hb_cfg.get("activeHours") or {}
+        if isinstance(ah, dict):
+            self._active_hours_start = raw_start or str(ah.get("start", "")) or None
+            self._active_hours_end = raw_end or str(ah.get("end", "")) or None
+        else:
+            self._active_hours_start = raw_start or None
+            self._active_hours_end = raw_end or None
+
+        hb_model = os.getenv("HERMES_HEARTBEAT_MODEL", "").strip()
+        cfg_model = hb_cfg.get("model", "")
+        self._model = hb_model or str(cfg_model) if cfg_model else ""
+
+
+class _HeartbeatMdCache:
+    """mtime-based cache for HEARTBEAT.md — avoids re-reading unchanged files."""
+
+    __slots__ = ("_path", "_mtime", "_content")
+
+    def __init__(self):
+        self._path: Optional[Path] = None
+        self._mtime: float = 0.0
+        self._content: Optional[str] = None
+
+    def get(self) -> Optional[str]:
+        try:
+            path = get_hermes_home() / "HEARTBEAT.md"
+        except Exception:
+            return None
+
+        try:
+            stat = path.stat()
+        except OSError:
+            self._mtime = 0.0
+            self._content = None
+            self._path = None
+            return None
+
+        mtime = stat.st_mtime
+        if path == self._path and mtime == self._mtime and self._content is not None:
+            return self._content
+
+        self._path = path
+        self._mtime = mtime
+        self._content = load_heartbeat_md()
+        return self._content
 
 
 class HeartbeatScheduler:
@@ -123,118 +233,12 @@ class HeartbeatScheduler:
         self._thread: Optional[threading.Thread] = None
         self._last_target_session: Optional[str] = None
         self._last_target_platform = None
-
-    @property
-    def _interval(self) -> float:
-        raw = os.getenv("HERMES_HEARTBEAT_EVERY", "0m").strip()
-        try:
-            from hermes_cli.config import load_config
-            cfg = load_config()
-            hb_cfg = cfg.get("heartbeat", {})
-            if isinstance(hb_cfg, dict):
-                cfg_val = hb_cfg.get("every", raw)
-                if cfg_val:
-                    raw = str(cfg_val)
-        except Exception:
-            pass
-        return _parse_interval(raw)
-
-    @property
-    def _target(self) -> str:
-        raw = os.getenv("HERMES_HEARTBEAT_TARGET", "none").strip().lower()
-        try:
-            from hermes_cli.config import load_config
-            cfg = load_config()
-            hb_cfg = cfg.get("heartbeat", {})
-            if isinstance(hb_cfg, dict):
-                cfg_val = hb_cfg.get("target", raw)
-                if cfg_val:
-                    raw = str(cfg_val).lower()
-        except Exception:
-            pass
-        return raw
-
-    @property
-    def _prompt(self) -> str:
-        raw = os.getenv("HERMES_HEARTBEAT_PROMPT", "").strip()
-        if raw:
-            return raw
-        try:
-            from hermes_cli.config import load_config
-            cfg = load_config()
-            hb_cfg = cfg.get("heartbeat", {})
-            if isinstance(hb_cfg, dict):
-                cfg_val = hb_cfg.get("prompt", "")
-                if cfg_val:
-                    return str(cfg_val)
-        except Exception:
-            pass
-        return _DEFAULT_PROMPT
-
-    @property
-    def _light_context(self) -> bool:
-        raw = os.getenv("HERMES_HEARTBEAT_LIGHT_CONTEXT", "true").strip().lower()
-        try:
-            from hermes_cli.config import load_config
-            cfg = load_config()
-            hb_cfg = cfg.get("heartbeat", {})
-            if isinstance(hb_cfg, dict):
-                cfg_val = hb_cfg.get("lightContext", None)
-                if cfg_val is not None:
-                    return bool(cfg_val)
-        except Exception:
-            pass
-        return raw in ("true", "1", "yes")
-
-    @property
-    def _ack_max_chars(self) -> int:
-        raw = os.getenv("HERMES_HEARTBEAT_ACK_MAX_CHARS", "300").strip()
-        try:
-            return int(raw)
-        except (ValueError, TypeError):
-            return 300
-
-    @property
-    def _active_hours_start(self) -> Optional[str]:
-        raw = os.getenv("HERMES_HEARTBEAT_ACTIVE_HOURS_START", "").strip()
-        if raw:
-            return raw
-        try:
-            from hermes_cli.config import load_config
-            cfg = load_config()
-            hb_cfg = cfg.get("heartbeat", {})
-            if isinstance(hb_cfg, dict):
-                ah = hb_cfg.get("activeHours", {})
-                if isinstance(ah, dict):
-                    start = ah.get("start", "")
-                    if start:
-                        return str(start)
-        except Exception:
-            pass
-        return None
-
-    @property
-    def _active_hours_end(self) -> Optional[str]:
-        raw = os.getenv("HERMES_HEARTBEAT_ACTIVE_HOURS_END", "").strip()
-        if raw:
-            return raw
-        try:
-            from hermes_cli.config import load_config
-            cfg = load_config()
-            hb_cfg = cfg.get("heartbeat", {})
-            if isinstance(hb_cfg, dict):
-                ah = hb_cfg.get("activeHours", {})
-                if isinstance(ah, dict):
-                    end = ah.get("end", "")
-                    if end:
-                        return str(end)
-        except Exception:
-            pass
-        return None
+        self._cfg = _HeartbeatConfig()
+        self._md_cache = _HeartbeatMdCache()
 
     def start(self):
-        """Start the heartbeat background thread."""
-        interval = self._interval
+        self._cfg.refresh()
+        interval = self._cfg._interval
         if interval <= 0:
             logger.info("Heartbeat disabled (interval=0)")
             return
@@ -249,57 +253,54 @@ class HeartbeatScheduler:
         self._thread.start()
         logger.info(
             "Heartbeat scheduler started (interval=%.0fs target=%s lightContext=%s)",
-            interval, self._target, self._light_context,
+            interval, self._cfg._target, self._cfg._light_context,
         )
 
     def stop(self):
-        """Stop the heartbeat background thread."""
         self._stop_event.set()
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=5)
         logger.info("Heartbeat scheduler stopped")
 
     def update_last_target(self, session_key: str, platform):
-        """Track the last session that received a message, for 'last' target."""
         self._last_target_session = session_key
         self._last_target_platform = platform
 
     def _resolve_target_session(self):
-        """Resolve the target session/platform for heartbeat delivery."""
-        target = self._target
+        target = self._cfg._target
         if target == "none":
             return None, None
         if target == "last":
             return self._last_target_session, self._last_target_platform
-        platform_key = target
         runner = self._runner
         for plat, adapter in runner.adapters.items():
             pval = plat.value if hasattr(plat, "value") else str(plat)
-            if pval == platform_key:
-                home_chat = adapter.get_home_chat_id() if hasattr(adapter, "get_home_chat_id") else None
+            if pval == target:
+                home_chat = getattr(adapter, "get_home_chat_id", None)
                 if home_chat:
+                    chat_id = home_chat()
+                else:
+                    continue
+                if chat_id:
                     from gateway.session import SessionSource
                     from gateway.config import Platform
                     try:
                         plat_enum = Platform(pval)
                     except ValueError:
-                        plat_enum = None
-                    if plat_enum:
-                        source = SessionSource(
-                            platform=plat_enum,
-                            chat_id=home_chat,
-                            chat_name="heartbeat",
-                            chat_type="dm",
-                            user_id="heartbeat",
-                            user_name="Heartbeat",
-                        )
-                        session_key = runner._session_key_for_source(source)
-                        return session_key, plat
+                        continue
+                    source = SessionSource(
+                        platform=plat_enum,
+                        chat_id=chat_id,
+                        chat_name="heartbeat",
+                        chat_type="dm",
+                        user_id="heartbeat",
+                        user_name="Heartbeat",
+                    )
+                    return runner._session_key_for_source(source), plat
         return None, None
 
     def _run_loop(self):
-        """Background loop that triggers heartbeat turns."""
-        interval = self._interval
+        interval = self._cfg._interval
         if interval <= 0:
             return
         while not self._stop_event.is_set():
@@ -312,19 +313,20 @@ class HeartbeatScheduler:
                 logger.warning("Heartbeat tick error: %s", exc)
 
     def _tick(self):
-        """Execute one heartbeat tick."""
-        if not _is_within_active_hours(self._active_hours_start, self._active_hours_end):
+        self._cfg.refresh()
+
+        if not _is_within_active_hours(self._cfg._active_hours_start, self._cfg._active_hours_end):
             logger.debug("Heartbeat skipped — outside active hours")
             return
 
-        heartbeat_md = load_heartbeat_md()
-        if self._light_context and heartbeat_md is None:
+        heartbeat_md = self._md_cache.get()
+        if self._cfg._light_context and heartbeat_md is None:
             logger.debug("Heartbeat skipped — lightContext on but no HEARTBEAT.md")
             return
 
         session_key, platform = self._resolve_target_session()
         if not session_key:
-            logger.debug("Heartbeat skipped — no target session (target=%s)", self._target)
+            logger.debug("Heartbeat skipped — no target session (target=%s)", self._cfg._target)
             return
 
         runner = self._runner
@@ -332,12 +334,12 @@ class HeartbeatScheduler:
             logger.debug("Heartbeat skipped — agent running for session %s", session_key)
             return
 
-        prompt = self._prompt
+        prompt = self._cfg._prompt
         logger.info(
             "Heartbeat firing for session %s (platform=%s lightContext=%s)",
             session_key,
             platform.value if hasattr(platform, "value") else platform,
-            self._light_context,
+            self._cfg._light_context,
         )
 
         try:
@@ -346,7 +348,6 @@ class HeartbeatScheduler:
             logger.warning("Heartbeat agent run failed: %s", exc)
 
     def _run_heartbeat_agent(self, prompt: str, session_key: str, platform, heartbeat_md: Optional[str]):
-        """Run a lightweight agent turn for the heartbeat."""
         from run_agent import AIAgent
         from hermes_cli.config import load_config, resolve_agent_turn_limits
 
@@ -358,32 +359,27 @@ class HeartbeatScheduler:
         api_key_env = model_cfg.get("api_key_env", "OPENAI_API_KEY")
         api_key = os.environ.get(api_key_env) or os.environ.get("OPENAI_API_KEY") or ""
 
-        hb_model = os.getenv("HERMES_HEARTBEAT_MODEL", "").strip()
+        hb_model = self._cfg._model
         if hb_model:
             model = hb_model
-        try:
-            hb_cfg = cfg.get("heartbeat", {})
-            if isinstance(hb_cfg, dict) and hb_cfg.get("model"):
-                model = hb_cfg["model"]
-        except Exception:
-            pass
 
         turn_limits = resolve_agent_turn_limits(cfg)
 
-        ephemeral_prompt = ""
-        if heartbeat_md and self._light_context:
+        light = self._cfg._light_context
+        ephemeral_prompt = None
+        if heartbeat_md and light:
             ephemeral_prompt = f"Heartbeat checklist:\n\n{heartbeat_md}\n"
 
         agent = AIAgent(
             model=model,
             api_key=api_key,
             base_url=base_url,
-            max_iterations=10,
+            max_iterations=3,
             quiet_mode=True,
-            skip_context_files=self._light_context,
-            load_soul_identity=not self._light_context,
+            skip_context_files=light,
+            load_soul_identity=not light,
             skip_memory=True,
-            ephemeral_system_prompt=ephemeral_prompt if ephemeral_prompt else None,
+            ephemeral_system_prompt=ephemeral_prompt,
             platform="heartbeat",
             enabled_toolsets=["send_message", "web_search", "memory"],
             continuation_policy=turn_limits.get("continuation_policy"),
@@ -393,18 +389,17 @@ class HeartbeatScheduler:
             result = agent.run_conversation(prompt)
             response = result.get("final_response", "") if isinstance(result, dict) else str(result)
 
-            if is_heartbeat_ok_response(response, self._ack_max_chars):
+            if is_heartbeat_ok_response(response, self._cfg._ack_max_chars):
                 logger.info("Heartbeat OK — nothing needs attention")
                 return
 
-            if response and self._target != "none":
+            if response and self._cfg._target != "none":
                 self._deliver_heartbeat_response(response, session_key, platform)
 
         except Exception as exc:
             logger.warning("Heartbeat agent execution failed: %s", exc)
 
     def _deliver_heartbeat_response(self, response: str, session_key: str, platform):
-        """Deliver the heartbeat response to the target platform."""
         runner = self._runner
         adapter = runner.adapters.get(platform)
         if not adapter:
@@ -412,7 +407,13 @@ class HeartbeatScheduler:
             return
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = getattr(runner, "_loop", None)
+            if loop is None:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = asyncio.get_event_loop()
+
             if loop.is_running():
                 asyncio.run_coroutine_threadsafe(
                     adapter.send_text(response, session_key),
