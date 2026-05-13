@@ -7,6 +7,7 @@ import logging
 import os
 import queue
 import subprocess
+import shlex
 import sys
 import threading
 import time
@@ -4013,8 +4014,7 @@ def _(rid, params: dict) -> dict:
         qc = qcmds[name]
         if qc.get("type") == "exec":
             r = subprocess.run(
-                qc.get("command", ""),
-                shell=True,
+                shlex.split(qc.get("command", "")),
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -5668,7 +5668,7 @@ def _(rid, params: dict) -> dict:
         pass
     try:
         r = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=30, cwd=os.getcwd()
+            shlex.split(cmd), capture_output=True, text=True, timeout=30, cwd=os.getcwd()
         )
         return _ok(
             rid,

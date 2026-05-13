@@ -419,6 +419,7 @@ def get_toolset(name: str) -> Optional[Dict[str, Any]]:
         if resolved != name:
             return TOOLSETS.get(resolved)
     except Exception:
+        logger.debug("get_toolset registry.resolve_toolset_alias failed", exc_info=True)
         pass
     return None
 
@@ -462,6 +463,7 @@ def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
         from tools.registry import registry
         name = registry.resolve_toolset_alias(name)
     except Exception:
+        logger.debug("resolve_toolset registry.resolve_toolset_alias failed", exc_info=True)
         pass
 
     # Get toolset definition
@@ -473,6 +475,7 @@ def resolve_toolset(name: str, visited: Set[str] = None) -> List[str]:
                 from tools.registry import registry
                 return [e.name for e in registry._tools.values() if e.toolset == name]
             except Exception:
+                logger.debug("resolve_toolset registry._tools access failed", exc_info=True)
                 pass
         return []
 
@@ -522,6 +525,7 @@ def _get_plugin_toolset_names() -> Set[str]:
             if entry.toolset not in TOOLSETS
         }
     except Exception:
+        logger.debug("_get_plugin_toolset_names failed", exc_info=True)
         return set()
 
 
@@ -546,6 +550,7 @@ def get_all_toolsets() -> Dict[str, Dict[str, Any]]:
                     "tools": tools,
                 }
             except Exception:
+                logger.debug("get_all_toolsets registry._tools access failed", exc_info=True)
                 pass
     return result
 
@@ -565,6 +570,7 @@ def get_toolset_names() -> List[str]:
         from tools.registry import registry
         names |= set(registry.get_toolset_aliases().keys())
     except Exception:
+        logger.debug("get_toolset_names registry.get_toolset_aliases failed", exc_info=True)
         pass
     return sorted(names)
 
@@ -592,6 +598,7 @@ def validate_toolset(name: str) -> bool:
         if resolved != name:
             return validate_toolset(resolved)
     except Exception:
+        logger.debug("validate_toolset registry.resolve_toolset_alias failed", exc_info=True)
         pass
     # Check tool registry for plugin-provided toolsets
     return name in _get_plugin_toolset_names()

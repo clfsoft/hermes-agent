@@ -36,6 +36,7 @@ from typing import List, Dict, Any, Optional
 logger = logging.getLogger(__name__)
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_PASTE_REF_RE = re.compile(r'\[Pasted text #\d+: \d+ lines \u2192 (.+?)\]')
 
 
 def _strip_ansi(text: str) -> str:
@@ -2809,7 +2810,7 @@ class HermesCLI:
         """Expand [Pasted text #N -> file] placeholders into file contents."""
         if not isinstance(text, str) or "[Pasted text #" not in text:
             return text or ""
-        paste_ref_re = re.compile(r'\[Pasted text #\d+: \d+ lines \u2192 (.+?)\]')
+        paste_ref_re = _PASTE_REF_RE
 
         def _expand_ref(match):
             path = Path(match.group(1))
@@ -6374,6 +6375,7 @@ class HermesCLI:
                 qcmd = quick_commands[base_cmd.lstrip("/")]
                 if qcmd.get("type") == "exec":
                     import subprocess
+                    import shlex
                     from tools.approval import detect_dangerous_command
                     exec_cmd = qcmd.get("command", "")
                     if exec_cmd:
@@ -6386,7 +6388,7 @@ class HermesCLI:
                             return True
                         try:
                             result = subprocess.run(
-                                exec_cmd, shell=True, capture_output=True,
+                                shlex.split(exec_cmd), capture_output=True,
                                 text=True, timeout=30
                             )
                             output = result.stdout.strip() or result.stderr.strip()
@@ -11329,7 +11331,7 @@ class HermesCLI:
                         continue
                     
                     # Expand paste references back to full content
-                    _paste_ref_re = re.compile(r'\[Pasted text #\d+: \d+ lines \u2192 (.+?)\]')
+                    _paste_ref_re = _PASTE_REF_RE
                     paste_refs = list(_paste_ref_re.finditer(user_input)) if isinstance(user_input, str) else []
                     if paste_refs:
                         user_input = self._expand_paste_references(user_input)

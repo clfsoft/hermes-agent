@@ -237,6 +237,10 @@ load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve(
 
 _DOCKER_VOLUME_SPEC_RE = re.compile(r"^(?P<host>.+):(?P<container>/[^:]+?)(?::(?P<options>[^:]+))?$")
 _DOCKER_MEDIA_OUTPUT_CONTAINER_PATHS = {"/output", "/outputs"}
+_RE_DISPLAY_NAME_CLEAN = re.compile(r"[^\w.\- ]")
+_RE_UNICODE_DASH = re.compile(r"[\u2012\u2013\u2014\u2015](days|source)")
+_RE_ANSI_SEQ = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_RE_ANSI_CSI = re.compile(r"\x1b\[[0-9;]*m")
 
 # Bridge config.yaml values into the environment so os.getenv() picks them up.
 # config.yaml is authoritative for terminal settings — overrides .env.
@@ -454,6 +458,21 @@ from gateway.whatsapp_identity import (
     normalize_whatsapp_identifier as _normalize_whatsapp_identifier,
 )
 
+from gateway.message_handler import (
+    _build_media_placeholder,
+    _check_unavailable_skill,
+    _dequeue_pending_event,
+    _INTERRUPT_REASON_GATEWAY_RESTART,
+    _INTERRUPT_REASON_GATEWAY_SHUTDOWN,
+    _INTERRUPT_REASON_RESET,
+    _INTERRUPT_REASON_STOP,
+    _INTERRUPT_REASON_TIMEOUT,
+    _is_control_interrupt_message,
+    _load_gateway_config,
+    _platform_config_key,
+    _resolve_gateway_model,
+    resolve_turn_toolsets_for_route,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -494,161 +513,22 @@ def _try_resolve_fallback_provider() -> dict | None:
     return None
 
 
-def _build_media_placeholder(event) -> str:
-    """Build a text placeholder for media-only events so they aren't dropped.
-
-    When a photo/document is queued during active processing and later
-    dequeued, only .text is extracted.  If the event has no caption,
-    the media would be silently lost.  This builds a placeholder that
-    the vision enrichment pipeline will replace with a real description.
-    """
-    parts = []
-    media_urls = getattr(event, "media_urls", None) or []
-    media_types = getattr(event, "media_types", None) or []
-    for i, url in enumerate(media_urls):
-        mtype = media_types[i] if i < len(media_types) else ""
-        if mtype.startswith("image/") or getattr(event, "message_type", None) == MessageType.PHOTO:
-            parts.append(f"[User sent an image: {url}]")
-        elif mtype.startswith("audio/"):
-            parts.append(f"[User sent audio: {url}]")
-        else:
-            parts.append(f"[User sent a file: {url}]")
-    return "\n".join(parts)
 
 
-def _dequeue_pending_event(adapter, session_key: str) -> MessageEvent | None:
-    """Consume and return the full pending event for a session.
-
-    Queued follow-ups must preserve their media metadata so they can re-enter
-    the normal image/STT/document preprocessing path instead of being reduced
-    to a placeholder string.
-    """
-    return adapter.get_pending_message(session_key)
 
 
-_INTERRUPT_REASON_STOP = "Stop requested"
-_INTERRUPT_REASON_RESET = "Session reset requested"
-_INTERRUPT_REASON_TIMEOUT = "Execution timed out (inactivity)"
-_INTERRUPT_REASON_SSE_DISCONNECT = "SSE client disconnected"
-_INTERRUPT_REASON_GATEWAY_SHUTDOWN = "Gateway shutting down"
-_INTERRUPT_REASON_GATEWAY_RESTART = "Gateway restarting"
-
-_CONTROL_INTERRUPT_MESSAGES = frozenset(
-    {
-        _INTERRUPT_REASON_STOP.lower(),
-        _INTERRUPT_REASON_RESET.lower(),
-        _INTERRUPT_REASON_TIMEOUT.lower(),
-        _INTERRUPT_REASON_SSE_DISCONNECT.lower(),
-        _INTERRUPT_REASON_GATEWAY_SHUTDOWN.lower(),
-        _INTERRUPT_REASON_GATEWAY_RESTART.lower(),
-    }
-)
 
 
-def _is_control_interrupt_message(message: Optional[str]) -> bool:
-    """Return True when an interrupt message is internal control flow."""
-    if not message:
-        return False
-    normalized = " ".join(str(message).strip().split()).lower()
-    return normalized in _CONTROL_INTERRUPT_MESSAGES
 
 
-def _check_unavailable_skill(command_name: str) -> str | None:
-    """Check if a command matches a known-but-inactive skill.
-
-    Returns a helpful message if the skill exists but is disabled or only
-    available as an optional install. Returns None if no match found.
-    """
-    # Normalize: command uses hyphens, skill names may use hyphens or underscores
-    normalized = command_name.lower().replace("_", "-")
-    try:
-        from tools.skills_tool import _get_disabled_skill_names
-        from agent.skill_utils import get_all_skills_dirs
-        disabled = _get_disabled_skill_names()
-
-        # Check disabled skills across all dirs (local + external)
-        for skills_dir in get_all_skills_dirs():
-            if not skills_dir.exists():
-                continue
-            for skill_md in skills_dir.rglob("SKILL.md"):
-                if any(part in ('.git', '.github', '.hub') for part in skill_md.parts):
-                    continue
-                name = skill_md.parent.name.lower().replace("_", "-")
-                if name == normalized and name in disabled:
-                    return (
-                        f"The **{command_name}** skill is installed but disabled.\n"
-                        f"Enable it with: `hermes skills config`"
-                    )
-
-        # Check optional skills (shipped with repo but not installed)
-        from hermes_constants import get_optional_skills_dir
-        repo_root = Path(__file__).resolve().parent.parent
-        optional_dir = get_optional_skills_dir(repo_root / "optional-skills")
-        if optional_dir.exists():
-            for skill_md in optional_dir.rglob("SKILL.md"):
-                name = skill_md.parent.name.lower().replace("_", "-")
-                if name == normalized:
-                    # Build install path: official/<category>/<name>
-                    rel = skill_md.parent.relative_to(optional_dir)
-                    parts = list(rel.parts)
-                    install_path = f"official/{'/'.join(parts)}"
-                    return (
-                        f"The **{command_name}** skill is available but not installed.\n"
-                        f"Install it with: `hermes skills install {install_path}`"
-                    )
-    except Exception:
-        logger.debug("_check_unavailable_skill failed", exc_info=True)
-    return None
 
 
-def _platform_config_key(platform: "Platform") -> str:
-    """Map a Platform enum to its config.yaml key (LOCAL→"cli", rest→enum value)."""
-    return "cli" if platform == Platform.LOCAL else platform.value
 
 
-def _load_gateway_config() -> dict:
-    """Load and parse ~/.hermes/config.yaml, returning {} on any error.
-
-    Uses the module-level ``_hermes_home`` (so tests that monkeypatch it
-    still see their fixture) and shares the mtime-keyed raw-yaml cache
-    from ``hermes_cli.config.read_raw_config`` when the paths match.
-    """
-    config_path = _hermes_home / 'config.yaml'
-    try:
-        from hermes_cli.config import get_config_path, read_raw_config
-        # Fast path: if _hermes_home agrees with the canonical config
-        # location, reuse the shared cache. Otherwise fall through to a
-        # direct read (keeps test fixtures with a monkeypatched
-        # _hermes_home working).
-        if config_path == get_config_path():
-            return read_raw_config()
-    except Exception:
-        logger.debug("_load_gateway_config failed", exc_info=True)
-
-    try:
-        if config_path.exists():
-            import yaml
-            with open(config_path, 'r', encoding='utf-8') as f:
-                return yaml.safe_load(f) or {}
-    except Exception:
-        logger.debug("Could not load gateway config from %s", config_path)
-    return {}
 
 
-def _resolve_gateway_model(config: dict | None = None) -> str:
-    """Read model from config.yaml — single source of truth.
 
-    Without this, temporary AIAgent instances (e.g. /compress) fall
-    back to the hardcoded default which fails when the active provider is
-    openai-codex.
-    """
-    cfg = config if config is not None else _load_gateway_config()
-    model_cfg = cfg.get("model", {})
-    if isinstance(model_cfg, str):
-        return model_cfg
-    elif isinstance(model_cfg, dict):
-        return model_cfg.get("default") or model_cfg.get("model") or ""
-    return ""
+
 
 
 def _resolve_hermes_bin() -> Optional[list[str]]:
@@ -4878,7 +4758,7 @@ class GatewayRunner:
             basename = os.path.basename(path)
             parts = basename.split("_", 2)
             display_name = parts[2] if len(parts) >= 3 else basename
-            display_name = re.sub(r"[^\w.\- ]", "_", display_name)
+            display_name = _RE_DISPLAY_NAME_CLEAN.sub("_", display_name)
 
             if mtype.startswith("text/"):
                 context_note = (
@@ -7534,8 +7414,7 @@ class GatewayRunner:
             self._reasoning_config = reasoning_config
             self._service_tier = self._load_service_tier()
             turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
-            from agent.smart_model_routing import resolve_turn_toolsets
-            turn_toolsets = resolve_turn_toolsets(turn_route, enabled_toolsets)
+            turn_toolsets = resolve_turn_toolsets_for_route(turn_route, enabled_toolsets)
             bg_session_key = self._session_key_for_source(source)
 
             def _continuation_callback_sync(payload: dict) -> str:
@@ -8520,7 +8399,7 @@ class GatewayRunner:
         args = event.get_command_args().strip()
 
         # Normalize Unicode dashes (Telegram/iOS auto-converts -- to em/en dash)
-        args = re.sub(r'[\u2012\u2013\u2014\u2015](days|source)', r'--\1', args)
+        args = _RE_UNICODE_DASH.sub(r'--\1', args)
 
         days = 30
         source = None
@@ -9302,7 +9181,7 @@ class GatewayRunner:
             return
 
         def _strip_ansi(text: str) -> str:
-            return re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', text)
+            return _RE_ANSI_SEQ.sub('', text)
 
         bytes_sent = 0
         last_stream_time = loop.time()
@@ -9495,7 +9374,7 @@ class GatewayRunner:
 
             if adapter and chat_id:
                 # Strip ANSI escape codes for clean display
-                output = re.sub(r'\x1b\[[0-9;]*m', '', output).strip()
+                output = _RE_ANSI_CSI.sub('', output).strip()
                 if output:
                     if len(output) > 3500:
                         output = "…" + output[-3500:]
@@ -11519,8 +11398,7 @@ class GatewayRunner:
                 return "deny"
 
             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
-            from agent.smart_model_routing import resolve_turn_toolsets
-            turn_toolsets = resolve_turn_toolsets(turn_route, enabled_toolsets)
+            turn_toolsets = resolve_turn_toolsets_for_route(turn_route, enabled_toolsets)
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool
