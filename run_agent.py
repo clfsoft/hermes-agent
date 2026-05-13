@@ -142,6 +142,16 @@ from agent.trajectory import (
 )
 from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, normalize_proxy_url
 from hermes_cli.config import cfg_get, load_config
+from hermes_cli.cpa_boundary import (
+    CPA_CANONICAL_PROVIDER,
+    DEFAULT_CPA_BASE_URL,
+    LegacyProviderDisabledError,
+    cpa_base_url_boundary_message,
+    cpa_api_mode_for_base_url,
+    is_known_direct_provider_base_url,
+    is_cpa_provider,
+    normalize_cpa_base_url,
+)
 
 
 
@@ -1103,44 +1113,47 @@ class AIAgent:
         self._credential_pool = credential_pool
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
-        # Store effective base URL for feature detection (prompt caching, reasoning, etc.)
-        self.base_url = base_url or ""
         provider_name = provider.strip().lower() if isinstance(provider, str) and provider.strip() else None
-        self.provider = provider_name or ""
+        legacy_provider_requested = bool(provider_name and not is_cpa_provider(provider_name))
+        explicit_cpa_base_url = "" if legacy_provider_requested else (base_url or "")
+        # Store effective CPA base URL for feature detection. Hermes runtime is
+        # CPA-only; upstream providers live behind CPA, not in this process.
+        # If a legacy provider was explicitly passed, ignore its direct base_url
+        # to avoid accidentally bypassing CPA.
+        self.base_url = normalize_cpa_base_url(
+            explicit_cpa_base_url or DEFAULT_CPA_BASE_URL
+        )
+        if explicit_cpa_base_url and is_known_direct_provider_base_url(explicit_cpa_base_url):
+            raise ValueError(cpa_base_url_boundary_message(explicit_cpa_base_url))
+        if legacy_provider_requested:
+            logger.warning("Ignoring legacy provider %r; Hermes runtime is CPA-only", provider_name)
+        self.provider = CPA_CANONICAL_PROVIDER
         self.acp_command = acp_command or command
         self.acp_args = list(acp_args or args or [])
-        if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse"}:
+        if api_mode in {"chat_completions", "anthropic_messages"}:
             self.api_mode = api_mode
-        elif self.provider == "openai-codex":
-            self.api_mode = "codex_responses"
-        elif self.provider == "xai":
-            self.api_mode = "codex_responses"
-        elif (provider_name is None) and (
-            self._base_url_hostname == "chatgpt.com"
-            and "/backend-api/codex" in self._base_url_lower
-        ):
-            self.api_mode = "codex_responses"
-            self.provider = "openai-codex"
-        elif (provider_name is None) and self._base_url_hostname == "api.x.ai":
-            self.api_mode = "codex_responses"
-            self.provider = "xai"
-        elif self.provider == "anthropic" or (provider_name is None and self._base_url_hostname == "api.anthropic.com"):
-            self.api_mode = "anthropic_messages"
-            self.provider = "anthropic"
-        elif self._base_url_lower.rstrip("/").endswith("/anthropic"):
-            # Third-party Anthropic-compatible endpoints (e.g. MiniMax, DashScope)
-            # use a URL convention ending in /anthropic. Auto-detect these so the
-            # Anthropic Messages API adapter is used instead of chat completions.
-            self.api_mode = "anthropic_messages"
-        elif self.provider == "bedrock" or (
-            self._base_url_hostname.startswith("bedrock-runtime.")
-            and base_url_host_matches(self._base_url_lower, "amazonaws.com")
-        ):
-            # AWS Bedrock — auto-detect from provider name or base URL
-            # (bedrock-runtime.<region>.amazonaws.com).
-            self.api_mode = "bedrock_converse"
         else:
-            self.api_mode = "chat_completions"
+            self.api_mode = cpa_api_mode_for_base_url(self.base_url)
+
+        try:
+            from hermes_cli.runtime_provider import resolve_runtime_provider as _resolve_cpa_runtime
+            _runtime = _resolve_cpa_runtime(
+                requested=self.provider,
+                explicit_api_key=api_key,
+                explicit_base_url=explicit_cpa_base_url,
+                target_model=self.model,
+            )
+            api_key = api_key or _runtime.get("api_key") or "no-key-required"
+            self.base_url = _runtime.get("base_url") or self.base_url
+            base_url = self.base_url
+            if api_mode not in {"chat_completions", "anthropic_messages"}:
+                self.api_mode = _runtime.get("api_mode") or cpa_api_mode_for_base_url(self.base_url)
+        except LegacyProviderDisabledError:
+            raise
+        except Exception as exc:
+            logger.debug("CPA runtime normalization skipped: %s", exc)
+            api_key = api_key or "no-key-required"
+            base_url = self.base_url
 
         # Eagerly warm the transport cache so import errors surface at init,
         # not mid-conversation.  Also validates the api_mode is registered.
@@ -1175,6 +1188,7 @@ class AIAgent:
         if (
             api_mode is None
             and self.api_mode == "chat_completions"
+            and not is_cpa_provider(self.provider)
             and self.provider != "copilot-acp"
             and not str(self.base_url or "").lower().startswith("acp://copilot")
             and not str(self.base_url or "").lower().startswith("acp+tcp://")
@@ -7691,8 +7705,8 @@ class AIAgent:
 
         old_model = self.model
         self.model = fb_model
-        self.provider = "cliproxyapi"
-        self.api_mode = "chat_completions"
+        self.provider = CPA_CANONICAL_PROVIDER
+        self.api_mode = cpa_api_mode_for_base_url(self.base_url)
         if fb.get("context_length"):
             try:
                 self._config_context_length = int(fb.get("context_length"))

@@ -8182,7 +8182,6 @@ class HermesCLI:
                     self._voice_continuous = False
                     self._no_speech_count = 0
                     _cprint(f"{_DIM}连续 3 次未检测到语音，已停止连续模式。{_RST}")
-                    return
             else:
                 self._no_speech_count = 0
 

@@ -26,7 +26,17 @@ def test_cpa_alias_provider_registered():
 
 def test_resolve_provider_accepts_cpa_names():
     assert resolve_provider("cliproxyapi") == "cliproxyapi"
-    assert resolve_provider("cpa") == "cpa"
+    assert resolve_provider("cpa") == "cliproxyapi"
+
+
+def test_resolve_provider_rejects_legacy_names():
+    from hermes_cli.auth import AuthError
+
+    with pytest.raises(AuthError) as exc:
+        resolve_provider("openrouter")
+
+    assert exc.value.code == "legacy_provider_disabled"
+    assert "CPA/CLIProxyAPI" in str(exc.value)
 
 
 def test_runtime_provider_defaults_to_local_cpa(monkeypatch):
@@ -48,6 +58,32 @@ def test_legacy_provider_runtime_is_disabled(monkeypatch):
 
     with pytest.raises(LegacyProviderDisabledError):
         resolve_runtime_provider(requested="openrouter")
+
+
+def test_cpa_runtime_rejects_direct_provider_base_url():
+    with pytest.raises(LegacyProviderDisabledError) as exc:
+        resolve_runtime_provider(
+            requested="cliproxyapi",
+            explicit_base_url="https://openrouter.ai/api/v1",
+        )
+
+    assert "CPA base_url" in str(exc.value)
+
+
+def test_agent_constructor_rejects_cpa_direct_provider_base_url():
+    from run_agent import AIAgent
+
+    with pytest.raises(ValueError) as exc:
+        AIAgent(
+            provider="cliproxyapi",
+            base_url="https://api.anthropic.com",
+            api_key="dummy-key",
+            model="gpt-5(8192)",
+            quiet_mode=True,
+            enabled_toolsets=[],
+        )
+
+    assert "CPA base_url" in str(exc.value)
 
 
 def test_default_config_is_cpa_first():
@@ -107,8 +143,33 @@ def test_cliproxyapi_is_visible_in_model_picker():
     from hermes_cli.models import CANONICAL_PROVIDERS, provider_model_ids
 
     provider_ids = [provider.slug for provider in CANONICAL_PROVIDERS]
-    assert "cliproxyapi" in provider_ids
+    assert provider_ids == ["cliproxyapi"]
     assert provider_model_ids("cliproxyapi")[0] == "gpt-5(8192)"
+
+
+def test_legacy_provider_model_list_is_hidden():
+    from hermes_cli.models import list_available_providers, provider_label, provider_model_ids
+
+    assert [provider["id"] for provider in list_available_providers()] == ["cliproxyapi"]
+    assert provider_model_ids("openrouter") == []
+    assert provider_label("openrouter") == "CLIProxyAPI / CPA"
+
+
+def test_agent_constructor_collapses_legacy_provider_to_cpa():
+    from run_agent import AIAgent
+
+    agent = AIAgent(
+        provider="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="dummy-key",
+        model="gpt-5(8192)",
+        quiet_mode=True,
+        enabled_toolsets=[],
+    )
+
+    assert agent.provider == "cliproxyapi"
+    assert agent.base_url == "http://127.0.0.1:8080/v1"
+    assert agent.api_mode == "chat_completions"
 
 
 def test_cliproxyapi_model_suffix_is_preserved():

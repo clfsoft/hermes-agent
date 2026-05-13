@@ -3941,11 +3941,25 @@ def start_server(
     if open_browser:
         import webbrowser
 
-        def _open():
-            time.sleep(1.0)
-            webbrowser.open(f"http://{host}:{port}")
+        _has_display = (
+            sys.platform != "linux"
+            or bool(os.environ.get("DISPLAY"))
+            or bool(os.environ.get("WAYLAND_DISPLAY"))
+        )
 
-        threading.Thread(target=_open, daemon=True).start()
+        if _has_display:
+            def _open():
+                try:
+                    time.sleep(1.0)
+                    webbrowser.open(f"http://{host}:{port}")
+                except Exception:
+                    pass
+
+            threading.Thread(target=_open, daemon=True).start()
+        else:
+            _log.debug(
+                "Skipping browser-open: no DISPLAY or WAYLAND_DISPLAY detected (headless Linux)."
+            )
 
     print(f"  Hermes Web UI → http://{host}:{port}")
     if _DASHBOARD_PUBLIC_API_PROXY_ENABLED:

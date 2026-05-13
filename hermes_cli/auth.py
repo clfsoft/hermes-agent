@@ -1,14 +1,15 @@
 """
-Multi-provider authentication system for Hermes Agent.
+Authentication helpers for Hermes Agent.
 
-Supports OAuth device code flows (Nous Portal, future: OpenAI Codex) and
-traditional API key providers (OpenRouter, custom endpoints). Auth state
-is persisted in ~/.hermes/auth.json with cross-process file locking.
+Hermes runtime inference is CPA-only: model traffic goes through CLIProxyAPI,
+while this module keeps legacy provider metadata for CPA import, OAuth helpers,
+credential migration, and management UI features. Auth state is persisted in
+~/.hermes/auth.json with cross-process file locking.
 
 Architecture:
 - ProviderConfig registry defines known OAuth providers
 - Auth store (auth.json) holds per-provider credential state
-- resolve_provider() picks the active provider via priority chain
+- resolve_provider() enforces the CPA-only runtime provider boundary
 - resolve_*_runtime_credentials() handles token refresh and key minting
 - logout_command() is the CLI entry point for clearing auth
 """
@@ -42,6 +43,11 @@ import httpx
 import yaml
 
 from hermes_cli.config import get_config_path, read_raw_config
+from hermes_cli.cpa_boundary import (
+    CPA_CANONICAL_PROVIDER,
+    CPA_PROVIDER_ALIASES,
+    legacy_provider_disabled_message,
+)
 from hermes_constants import get_hermes_home, OPENROUTER_BASE_URL
 from utils import atomic_replace
 
@@ -432,6 +438,23 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         base_url_env_var="AZURE_FOUNDRY_BASE_URL",
     ),
 }
+
+
+_CPA_PROVIDER_CONFIG = PROVIDER_REGISTRY["cliproxyapi"]
+
+
+def runtime_provider_registry() -> Dict[str, ProviderConfig]:
+    """Return the public inference provider registry.
+
+    Hermes runtime provider selection is CPA-only.  The larger
+    ``PROVIDER_REGISTRY`` remains available internally for OAuth import,
+    migration, and CPA management helpers, but UI/model/runtime callers should
+    use this narrowed registry.
+    """
+    return {
+        "cliproxyapi": _CPA_PROVIDER_CONFIG,
+        "cpa": PROVIDER_REGISTRY["cpa"],
+    }
 
 
 # =============================================================================
@@ -1166,118 +1189,20 @@ def resolve_provider(
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
 ) -> str:
-    """
-    Determine which inference provider to use.
+    """Return the only runtime provider, or reject legacy provider routing.
 
-    Priority (when requested="auto" or None):
-    1. active_provider in auth.json with valid credentials
-    2. Explicit CLI api_key/base_url -> "openrouter"
-    3. OPENAI_API_KEY or OPENROUTER_API_KEY env vars -> "openrouter"
-    4. Provider-specific API keys (GLM, Kimi, MiniMax) -> that provider
-    5. Fallback: "openrouter"
+    OAuth/API-key provider metadata remains available elsewhere in this module
+    for CPA import and management UI tasks. This resolver is intentionally
+    narrower because Hermes inference must not bypass CPA/CLIProxyAPI.
     """
+    _ = (explicit_api_key, explicit_base_url)
     normalized = (requested or "auto").strip().lower()
-
-    # Normalize provider aliases
-    _PROVIDER_ALIASES = {
-        "glm": "zai", "z-ai": "zai", "z.ai": "zai", "zhipu": "zai",
-        "google": "gemini", "google-gemini": "gemini", "google-ai-studio": "gemini",
-        "x-ai": "xai", "x.ai": "xai", "grok": "xai",
-        "kimi": "kimi-coding", "kimi-for-coding": "kimi-coding", "moonshot": "kimi-coding",
-        "kimi-cn": "kimi-coding-cn", "moonshot-cn": "kimi-coding-cn",
-        "step": "stepfun", "stepfun-coding-plan": "stepfun",
-        "arcee-ai": "arcee", "arceeai": "arcee",
-        "gmi-cloud": "gmi", "gmicloud": "gmi",
-        "minimax-china": "minimax-cn", "minimax_cn": "minimax-cn",
-        "minimax-portal": "minimax-oauth", "minimax-global": "minimax-oauth", "minimax_oauth": "minimax-oauth",
-        "alibaba_coding": "alibaba-coding-plan", "alibaba-coding": "alibaba-coding-plan",
-        "alibaba_coding_plan": "alibaba-coding-plan",
-        "claude": "anthropic", "claude-code": "anthropic",
-        "github": "copilot", "github-copilot": "copilot",
-        "github-models": "copilot", "github-model": "copilot",
-        "github-copilot-acp": "copilot-acp", "copilot-acp-agent": "copilot-acp",
-        "aigateway": "ai-gateway", "vercel": "ai-gateway", "vercel-ai-gateway": "ai-gateway",
-        "opencode": "opencode-zen", "zen": "opencode-zen",
-        "qwen-portal": "qwen-oauth", "qwen-cli": "qwen-oauth", "qwen-oauth": "qwen-oauth", "google-gemini-cli": "google-gemini-cli", "gemini-cli": "google-gemini-cli", "gemini-oauth": "google-gemini-cli",
-        "hf": "huggingface", "hugging-face": "huggingface", "huggingface-hub": "huggingface",
-        "mimo": "xiaomi", "xiaomi-mimo": "xiaomi",
-        "tencent": "tencent-tokenhub", "tokenhub": "tencent-tokenhub",
-        "tencent-cloud": "tencent-tokenhub", "tencentmaas": "tencent-tokenhub",
-        "aws": "bedrock", "aws-bedrock": "bedrock", "amazon-bedrock": "bedrock", "amazon": "bedrock",
-        "go": "opencode-go", "opencode-go-sub": "opencode-go",
-        "kilo": "kilocode", "kilo-code": "kilocode", "kilo-gateway": "kilocode",
-        "lmstudio": "lmstudio", "lm-studio": "lmstudio", "lm_studio": "lmstudio",
-        # Local server aliases — route through the generic custom provider
-        "ollama": "custom", "ollama_cloud": "ollama-cloud",
-        "vllm": "custom", "llamacpp": "custom",
-        "llama.cpp": "custom", "llama-cpp": "custom",
-    }
-    normalized = _PROVIDER_ALIASES.get(normalized, normalized)
-
-    if normalized == "openrouter":
-        return "openrouter"
-    if normalized == "custom":
-        return "custom"
-    if normalized in PROVIDER_REGISTRY:
-        return normalized
-    if normalized != "auto":
-        # Check for common config.yaml issues that cause this error
-        _config_hint = _get_config_hint_for_unknown_provider(normalized)
-        msg = f"Unknown provider '{normalized}'."
-        if _config_hint:
-            msg += f"\n\n{_config_hint}"
-        else:
-            msg += " Check 'hermes model' for available providers, or run 'hermes doctor' to diagnose config issues."
-        raise AuthError(msg, code="invalid_provider")
-
-    # Explicit one-off CLI creds always mean openrouter/custom
-    if explicit_api_key or explicit_base_url:
-        return "openrouter"
-
-    # Check auth store for an active OAuth provider
-    try:
-        auth_store = _load_auth_store()
-        active = auth_store.get("active_provider")
-        if active and active in PROVIDER_REGISTRY:
-            status = get_auth_status(active)
-            if status.get("logged_in"):
-                return active
-    except Exception as e:
-        logger.debug("Could not detect active auth provider: %s", e)
-
-    if has_usable_secret(os.getenv("OPENAI_API_KEY")) or has_usable_secret(os.getenv("OPENROUTER_API_KEY")):
-        return "openrouter"
-
-    # Auto-detect API-key providers by checking their env vars
-    for pid, pconfig in PROVIDER_REGISTRY.items():
-        if pconfig.auth_type != "api_key":
-            continue
-        # GitHub tokens are commonly present for repo/tool access but should not
-        # hijack inference auto-selection unless the user explicitly chooses
-        # Copilot/GitHub Models as the provider. LM Studio is a local server
-        # whose availability isn't implied by LM_API_KEY presence (it may be
-        # offline, and the no-auth setup uses a placeholder value), so it
-        # also requires explicit selection.
-        if pid in ("copilot", "lmstudio"):
-            continue
-        for env_var in pconfig.api_key_env_vars:
-            if has_usable_secret(os.getenv(env_var, "")):
-                return pid
-
-    # AWS Bedrock — detect via boto3 credential chain (IAM roles, SSO, env vars).
-    # This runs after API-key providers so explicit keys always win.
-    try:
-        from agent.bedrock_adapter import has_aws_credentials
-        if has_aws_credentials():
-            return "bedrock"
-    except ImportError:
-        pass  # boto3 not installed — skip Bedrock auto-detection
-
+    if normalized in CPA_PROVIDER_ALIASES:
+        return CPA_CANONICAL_PROVIDER
     raise AuthError(
-        "No inference provider configured. Run 'hermes model' to choose a "
-        "provider and model, or set an API key (OPENROUTER_API_KEY, "
-        "OPENAI_API_KEY, etc.) in ~/.hermes/.env.",
-        code="no_provider_configured",
+        legacy_provider_disabled_message(normalized),
+        provider=normalized,
+        code="legacy_provider_disabled",
     )
 
 

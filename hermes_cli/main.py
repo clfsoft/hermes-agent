@@ -2051,6 +2051,20 @@ def _model_flow_cpa_only(config, current_model=""):
     print("  所有上游渠道都会写入 CPA，Hermes 只请求 CPA 的 OpenAI-compatible /v1。")
     print()
 
+    if not sys.stdin.isatty():
+        model_cfg = dict(model_cfg)
+        model_cfg.update({
+            "default": saved_model,
+            "provider": "cliproxyapi",
+            "base_url": saved_base_url.rstrip("/"),
+        })
+        config["model"] = model_cfg
+        from hermes_cli.config import save_config
+
+        save_config(config)
+        print("已在非交互模式下保存 CPA 默认连接。")
+        return
+
     try:
         model_name = input(f"Hermes 发给 CPA 的模型名 [{saved_model}]: ").strip() or saved_model
         base_url = input(f"CPA /v1 地址 [{saved_base_url}]: ").strip() or saved_base_url
@@ -8015,7 +8029,7 @@ def main():
     gateway_parser = subparsers.add_parser(
         "gateway",
         help="Messaging gateway management",
-        description="Manage the messaging gateway (Telegram, Discord, WhatsApp)",
+        description="Manage the messaging gateway (Telegram, Discord, WhatsApp, Weixin, and more)",
     )
     gateway_subparsers = gateway_parser.add_subparsers(dest="gateway_command")
 

@@ -312,7 +312,7 @@ async def test_safe_sync_slash_commands_only_mutates_diffs():
     }
     desired_updated = {
         "name": "help",
-        "description": "Show available commands",
+        "description": "查看可用命令",
         "type": 1,
         "options": [],
         "nsfw": False,
@@ -414,7 +414,7 @@ async def test_safe_sync_slash_commands_recreates_metadata_only_diffs():
 
     desired = {
         "name": "help",
-        "description": "Show available commands",
+        "description": "查看可用命令",
         "type": 1,
         "options": [],
         "nsfw": False,
@@ -611,7 +611,7 @@ async def test_safe_sync_detects_contexts_drift():
 
     desired = {
         "name": "help",
-        "description": "Show available commands",
+        "description": "查看可用命令",
         "type": 1,
         "options": [],
         "nsfw": False,

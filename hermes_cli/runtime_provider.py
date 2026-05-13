@@ -8,19 +8,20 @@ intentionally disabled: configure upstream providers inside CPA instead.
 from __future__ import annotations
 
 import os
-import urllib.parse
 from typing import Any, Dict, Optional
 
+from hermes_cli.cpa_boundary import (
+    CPA_PROVIDER_ALIASES,
+    DEFAULT_CPA_BASE_URL,
+    LegacyProviderDisabledError,
+    cpa_base_url_boundary_message,
+    cpa_api_mode_for_base_url,
+    is_known_direct_provider_base_url,
+    is_cpa_provider,
+    normalize_cpa_base_url,
+)
 from hermes_cli.config import load_config
 from utils import base_url_hostname
-
-CPA_PROVIDER_ALIASES = {"cliproxyapi", "cpa", "cliproxy", "cli-proxy-api"}
-DEFAULT_CPA_BASE_URL = "http://127.0.0.1:8080/v1"
-
-
-class LegacyProviderDisabledError(RuntimeError):
-    """Raised when code tries to use a non-CPA provider."""
-
 
 def _get_model_config() -> Dict[str, Any]:
     cfg = load_config()
@@ -30,24 +31,6 @@ def _get_model_config() -> Dict[str, Any]:
     if isinstance(model_cfg, dict):
         return dict(model_cfg)
     return {}
-
-
-def is_cpa_provider(provider: str) -> bool:
-    return (provider or "").strip().lower() in CPA_PROVIDER_ALIASES
-
-
-def normalize_cpa_base_url(base_url: str) -> str:
-    value = (base_url or "").strip().rstrip("/")
-    if not value:
-        return ""
-    parsed = urllib.parse.urlsplit(value)
-    path = parsed.path.rstrip("/")
-    if path.endswith("/v1") or path.endswith("/anthropic"):
-        return value
-    if path.endswith("/v0/management"):
-        path = path[: -len("/v0/management")].rstrip("/")
-    path = f"{path}/v1" if path else "/v1"
-    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", "")).rstrip("/")
 
 
 def resolve_requested_provider(requested: Optional[str] = None) -> str:
@@ -81,13 +64,16 @@ def resolve_runtime_provider(
             f"配置中的 provider '{cfg_provider}' 已禁用。请改为 provider: cliproxyapi，并在 CPA 中配置上游。"
         )
 
-    base_url = normalize_cpa_base_url(
+    raw_base_url = (
         (explicit_base_url or "").strip().rstrip("/")
         or os.getenv("CLIPROXY_BASE_URL", "").strip().rstrip("/")
         or os.getenv("CPA_BASE_URL", "").strip().rstrip("/")
         or cfg_base_url
         or DEFAULT_CPA_BASE_URL
     )
+    if is_known_direct_provider_base_url(raw_base_url):
+        raise LegacyProviderDisabledError(cpa_base_url_boundary_message(raw_base_url))
+    base_url = normalize_cpa_base_url(raw_base_url)
     api_key = (
         (explicit_api_key or "").strip()
         or os.getenv("CLIPROXY_API_KEY", "").strip()
@@ -97,7 +83,7 @@ def resolve_runtime_provider(
     )
     return {
         "provider": "cliproxyapi",
-        "api_mode": "chat_completions",
+        "api_mode": cpa_api_mode_for_base_url(base_url),
         "base_url": base_url,
         "api_key": api_key,
         "source": "cpa",
