@@ -2427,9 +2427,9 @@ def setup_gateway(config: dict):
     items = []
     pre_selected = []
     for i, plat in enumerate(platforms):
-        status = _platform_status(plat)
+        status = _gateway_platform_status_from_setup_env(plat, _platform_status)
         items.append(f"{plat['emoji']} {plat['label']}  ({status})")
-        if status == "configured":
+        if status.startswith("configured"):
             pre_selected.append(i)
 
     selected = prompt_checklist("Select platforms to configure:", items, pre_selected)
@@ -2454,7 +2454,8 @@ def setup_gateway(config: dict):
         )
 
     any_messaging = any(
-        _is_progress(_platform_status(p)) for p in _all_platforms()
+        _is_progress(_gateway_platform_status_from_setup_env(p, _platform_status))
+        for p in _all_platforms()
     )
     if any_messaging:
         print()
@@ -2698,6 +2699,48 @@ def _gateway_platform_short_label(label: str) -> str:
     return base or label
 
 
+def _gateway_platform_status_from_setup_env(plat: dict, fallback_status) -> str:
+    """Return gateway setup status using this module's current env reader."""
+    key = plat.get("key", "")
+    token_var = plat.get("token_var", "")
+    val = get_env_value(token_var) if token_var else ""
+
+    if key == "signal":
+        http_url = get_env_value("SIGNAL_HTTP_URL")
+        account = get_env_value("SIGNAL_ACCOUNT")
+        allowed = get_env_value("SIGNAL_ALLOWED_USERS") or get_env_value("SIGNAL_GROUP_ALLOWED_USERS")
+        if http_url and (account or allowed):
+            return "configured"
+        if http_url or account:
+            return "partially configured"
+        return "not configured"
+
+    if key == "matrix":
+        homeserver = get_env_value("MATRIX_HOMESERVER")
+        password = get_env_value("MATRIX_PASSWORD")
+        access_token = get_env_value("MATRIX_ACCESS_TOKEN")
+        if homeserver and (val or password or access_token):
+            e2ee = get_env_value("MATRIX_ENCRYPTION")
+            suffix = " + E2EE" if e2ee and e2ee.lower() in ("true", "1", "yes") else ""
+            return f"configured{suffix}"
+        if homeserver or password or access_token:
+            return "partially configured"
+        return "not configured"
+
+    if key == "weixin":
+        account_id = get_env_value("WEIXIN_ACCOUNT_ID")
+        token = get_env_value("WEIXIN_TOKEN")
+        if account_id and token:
+            return "configured"
+        if account_id or token:
+            return "partially configured"
+        return "not configured"
+
+    if token_var and val:
+        return "configured"
+    return fallback_status(plat)
+
+
 def _get_section_config_summary(config: dict, section_key: str) -> Optional[str]:
     """Return a short summary if a setup section is already configured, else None.
 
@@ -2725,15 +2768,16 @@ def _get_section_config_summary(config: dict, section_key: str) -> Optional[str]
 
     elif section_key == "gateway":
         from hermes_cli.gateway import _all_platforms, _platform_status
-        # Count any non-empty status other than the "not configured" sentinel —
-        # platforms like WhatsApp ("enabled, not paired"), Matrix ("configured
-        # + E2EE"), and Signal ("partially configured") all indicate the user
-        # has already started setup and we shouldn't force the section to rerun.
-        configured = [
-            _gateway_platform_short_label(plat["label"])
-            for plat in _all_platforms()
-            if _platform_status(plat) and _platform_status(plat) != "not configured"
-        ]
+
+        configured = []
+        for plat in _all_platforms():
+            status = _gateway_platform_status_from_setup_env(plat, _platform_status)
+            # Count any non-empty status other than the "not configured" sentinel —
+            # platforms like WhatsApp ("enabled, not paired"), Matrix ("configured
+            # + E2EE"), and Signal ("partially configured") all indicate the user
+            # has already started setup and we shouldn't force the section to rerun.
+            if status and status != "not configured":
+                configured.append(_gateway_platform_short_label(plat["label"]))
         if configured:
             return ", ".join(configured)
         return None  # No platforms configured — section must run
@@ -3252,8 +3296,21 @@ def _offer_launch_chat():
     if not prompt_yes_no("Launch hermes chat now?", True):
         return
 
-    from hermes_cli.relaunch import relaunch
-    relaunch(["chat"])
+    argv = _resolve_hermes_chat_argv()
+    if not argv:
+        print_info("Run 'hermes chat' manually to start chatting.")
+        return
+    os.execvp(argv[0], argv)
+
+
+def _resolve_hermes_chat_argv() -> list[str] | None:
+    """Return argv for launching a fresh ``hermes chat`` process."""
+    hermes_bin = shutil.which("hermes")
+    if hermes_bin:
+        return [hermes_bin, "chat"]
+    if importlib.util.find_spec("hermes_cli") is not None:
+        return [sys.executable, "-m", "hermes_cli.main", "chat"]
+    return None
 
 
 def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):

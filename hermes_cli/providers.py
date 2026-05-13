@@ -23,6 +23,13 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from hermes_cli.cpa_boundary import (
+    CPA_CANONICAL_PROVIDER,
+    CPA_DISPLAY_NAME,
+    cpa_api_mode_for_base_url,
+    is_cpa_provider,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -344,6 +351,8 @@ def get_provider(name: str) -> Optional[ProviderDef]:
 
 def get_label(provider_id: str) -> str:
     """Get a human-readable display name for a provider."""
+    if is_cpa_provider(provider_id):
+        return CPA_DISPLAY_NAME
     canonical = normalize_provider(provider_id)
 
     # Check label overrides first
@@ -362,6 +371,8 @@ def get_label(provider_id: str) -> str:
 
 def is_aggregator(provider: str) -> bool:
     """Return True when the provider is a multi-model aggregator."""
+    if is_cpa_provider(provider):
+        return True
     pdef = get_provider(provider)
     return pdef.is_aggregator if pdef else False
 
@@ -374,6 +385,9 @@ def determine_api_mode(provider: str, base_url: str = "") -> str:
       2. URL heuristics for unknown / custom providers.
       3. Default: 'chat_completions'.
     """
+    if is_cpa_provider(provider):
+        return cpa_api_mode_for_base_url(base_url)
+
     pdef = get_provider(provider)
     if pdef is not None:
         return TRANSPORT_TO_API_MODE.get(pdef.transport, "chat_completions")

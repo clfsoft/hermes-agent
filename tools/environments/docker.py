@@ -8,6 +8,7 @@ persistence via bind mounts.
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -541,7 +542,7 @@ class DockerEnvironment(BaseEnvironment):
                     f"(timeout 60 {self._docker_exe} stop {self._container_id} || "
                     f"{self._docker_exe} rm -f {self._container_id}) >/dev/null 2>&1 &"
                 )
-                subprocess.Popen(stop_cmd, shell=True)
+                subprocess.Popen(["/bin/bash", "-c", stop_cmd])
             except Exception as e:
                 logger.warning("Failed to stop container %s: %s", self._container_id, e)
 
@@ -549,8 +550,7 @@ class DockerEnvironment(BaseEnvironment):
                 # Also schedule removal (stop only leaves it as stopped)
                 try:
                     subprocess.Popen(
-                        f"sleep 3 && {self._docker_exe} rm -f {self._container_id} >/dev/null 2>&1 &",
-                        shell=True,
+                        ["/bin/bash", "-c", f"sleep 3 && {shlex.quote(self._docker_exe)} rm -f {shlex.quote(self._container_id)} >/dev/null 2>&1 &"],
                     )
                 except Exception:
                     logger.debug("cleanup failed", exc_info=True)

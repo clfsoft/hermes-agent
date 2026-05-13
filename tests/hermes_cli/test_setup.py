@@ -103,7 +103,8 @@ def test_setup_syncs_openrouter_from_disk(tmp_path, monkeypatch):
     _stub_tts(monkeypatch)
 
     config = load_config()
-    assert isinstance(config.get("model"), str)  # fresh install
+    assert isinstance(config.get("model"), dict)
+    assert config["model"]["provider"] == "cliproxyapi"
 
     def fake_select():
         _write_model_config(tmp_path, "openrouter", model_name="anthropic/claude-opus-4.6")
@@ -355,7 +356,8 @@ def test_select_provider_and_model_warns_if_named_custom_provider_disappears(
     select_provider_and_model()
 
     out = capsys.readouterr().out
-    assert "selected saved custom provider is no longer available" in out
+    assert "CPA-only" in out
+    assert "保存 CPA 默认连接" in out or "saved CPA default connection" in out
 
 
 def test_codex_setup_uses_runtime_access_token_for_live_model_list(tmp_path, monkeypatch):

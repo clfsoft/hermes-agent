@@ -1449,8 +1449,11 @@ class SessionStore:
         # legacy JSONL files are still readable for pre-migration sessions.
         if self._db is None:
             transcript_path = self.get_transcript_path(session_id)
-            with open(transcript_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(normalized_message, ensure_ascii=False) + "\n")
+            try:
+                with open(transcript_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(normalized_message, ensure_ascii=False) + "\n")
+            except OSError as e:
+                logger.debug("Failed to write JSONL transcript for %s: %s", session_id, e)
     
     def rewrite_transcript(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         """Replace the entire transcript for a session with new messages.

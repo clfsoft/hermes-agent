@@ -431,6 +431,7 @@ class SessionManager:
             return self._agent_factory()
 
         from run_agent import AIAgent
+        from hermes_cli.cpa_boundary import is_known_direct_provider_base_url
         from hermes_cli.config import load_config
         from hermes_cli.runtime_provider import resolve_runtime_provider
 
@@ -452,13 +453,26 @@ class SessionManager:
             "model": model or default_model,
         }
 
+        cpa_base_url = (base_url or "").strip() if isinstance(base_url, str) else ""
+        if cpa_base_url and is_known_direct_provider_base_url(cpa_base_url):
+            logger.warning(
+                "Ignoring legacy ACP direct-provider base_url %r; runtime is CPA-only",
+                cpa_base_url,
+            )
+            cpa_base_url = ""
+
+        restored_api_mode = api_mode if api_mode in {"chat_completions", "anthropic_messages"} else None
+
         try:
-            runtime = resolve_runtime_provider(requested=requested_provider or config_provider)
+            runtime = resolve_runtime_provider(
+                requested=requested_provider or config_provider,
+                explicit_base_url=cpa_base_url or None,
+            )
             kwargs.update(
                 {
                     "provider": runtime.get("provider"),
-                    "api_mode": api_mode or runtime.get("api_mode"),
-                    "base_url": base_url or runtime.get("base_url"),
+                    "api_mode": restored_api_mode or runtime.get("api_mode"),
+                    "base_url": runtime.get("base_url"),
                     "api_key": runtime.get("api_key"),
                     "command": runtime.get("command"),
                     "args": list(runtime.get("args") or []),

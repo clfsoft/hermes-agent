@@ -321,6 +321,31 @@ LINTERS = {
     '.rs': 'rustfmt --check {file} 2>&1',
 }
 
+
+_LINTER_UNUSABLE_PATTERNS = {
+    'npx': (
+        'this is not the tsc command you are looking for',
+        'could not determine executable to run',
+        'not found in npm registry',
+    ),
+    'rustfmt': (
+        'no input filename given',
+        'error: not a workspace',
+    ),
+    'go': (
+        'cannot find package',
+        'go: cannot find main module',
+    ),
+}
+
+
+def _looks_like_linter_unusable(base_cmd: str, output: str) -> bool:
+    patterns = _LINTER_UNUSABLE_PATTERNS.get(base_cmd)
+    if not patterns:
+        return False
+    lower = (output or "").lower()
+    return any(pattern in lower for pattern in patterns)
+
 # Max limits for read operations
 MAX_LINES = 2000
 MAX_LINE_LENGTH = 2000
@@ -818,6 +843,18 @@ class ShellFileOperations(FileOperations):
         # Run linter
         cmd = linter_cmd.replace("{file}", self._escape_shell_arg(path))
         result = self._exec(cmd, timeout=30)
+
+        if result.exit_code != 0 and _looks_like_linter_unusable(base_cmd, result.stdout):
+            from tools.ansi_strip import strip_ansi
+            cleaned = strip_ansi(result.stdout).strip()
+            first_line = next(
+                (line.strip() for line in cleaned.splitlines() if line.strip()),
+                cleaned[:120],
+            )
+            return LintResult(
+                skipped=True,
+                message=f"{base_cmd} not usable: {first_line[:200]}",
+            )
         
         return LintResult(
             success=result.exit_code == 0,

@@ -65,6 +65,7 @@ export default function ConfigPage() {
   const [yamlText, setYamlText] = useState("");
   const [yamlLoading, setYamlLoading] = useState(false);
   const [yamlSaving, setYamlSaving] = useState(false);
+  const [configPath, setConfigPath] = useState<string | null>(null);
   const [activeCategory, setActiveCategory] = useState<string>("");
   const { toast, showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -78,7 +79,14 @@ export default function ConfigPage() {
         setCategoryOrder(resp.category_order ?? []);
       })
       .catch(() => {});
-    api.getDefaults().then(setDefaults).catch(() => {});
+    api
+      .getDefaults()
+      .then(setDefaults)
+      .catch(() => {});
+    api
+      .getStatus()
+      .then((resp) => setConfigPath(resp.config_path))
+      .catch(() => {});
   }, []);
 
   // Set active category when categories load
@@ -267,7 +275,7 @@ export default function ConfigPage() {
         <div className="flex items-center gap-2">
           <Settings2 className="h-4 w-4 text-muted-foreground" />
           <code className="text-xs text-muted-foreground bg-muted/50 px-2 py-0.5 rounded">
-            ~/.hermes/config.yaml
+            {configPath ?? "~/.hermes/config.yaml"}
           </code>
         </div>
         <div className="flex items-center gap-1.5">

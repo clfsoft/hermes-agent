@@ -19,6 +19,15 @@ _PATH_KEY_RE = re.compile(r'(<key>PATH</key>\s*<string>)(.*?)(</string>)', re.S)
 
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
+# Windows lacks POSIX uid helpers, but gateway service-management tests and a
+# few defensive branches monkeypatch/call them.  Provide harmless fallbacks so
+# importing this module stays cross-platform; real systemd/launchd paths still
+# run only on Linux/macOS via supports_systemd_services()/is_macos().
+if not hasattr(os, "getuid"):
+    os.getuid = lambda: -1  # type: ignore[attr-defined]
+if not hasattr(os, "geteuid"):
+    os.geteuid = lambda: -1  # type: ignore[attr-defined]
+
 from gateway.status import terminate_pid
 from gateway.restart import (
     DEFAULT_GATEWAY_RESTART_DRAIN_TIMEOUT,
@@ -1593,8 +1602,10 @@ Environment="LOGNAME={username}"
 Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
 Environment="HERMES_HOME={hermes_home}"
-Restart=on-failure
-RestartSec=30
+Restart=always
+RestartSec=5
+RestartMaxDelaySec=300
+RestartSteps=5
 RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
 KillMode=mixed
 KillSignal=SIGTERM
@@ -1625,8 +1636,10 @@ WorkingDirectory={working_dir}
 Environment="PATH={sane_path}"
 Environment="VIRTUAL_ENV={venv_dir}"
 Environment="HERMES_HOME={hermes_home}"
-Restart=on-failure
-RestartSec=30
+Restart=always
+RestartSec=5
+RestartMaxDelaySec=300
+RestartSteps=5
 RestartForceExitStatus={GATEWAY_SERVICE_RESTART_EXIT_CODE}
 KillMode=mixed
 KillSignal=SIGTERM
@@ -1980,7 +1993,7 @@ def systemd_status(deep: bool = False, system: bool = False, full: bool = False)
         for line in runtime_lines:
             print(f"  {line}")
 
-    unit_props = _read_systemd_unit_properties(system=system)
+    unit_props = _read_systemd_unit_properties(system=system) if (deep or status != "active") else {}
     active_state = unit_props.get("ActiveState", "")
     sub_state = unit_props.get("SubState", "")
     exec_main_status = unit_props.get("ExecMainStatus", "")

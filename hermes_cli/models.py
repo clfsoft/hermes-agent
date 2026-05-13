@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Any, NamedTuple, Optional
 
 from hermes_cli import __version__ as _HERMES_VERSION
+from hermes_cli.cpa_boundary import (
+    CPA_CANONICAL_PROVIDER,
+    CPA_DISPLAY_NAME,
+    is_cpa_provider,
+)
 
 # Identify ourselves so endpoints fronted by Cloudflare's Browser Integrity
 # Check (error 1010) don't reject the default ``Python-urllib/*`` signature.
@@ -1180,8 +1185,16 @@ CANONICAL_PROVIDERS: list[ProviderEntry] = [
 ]
 
 # Derived dicts — used throughout the codebase
+_LEGACY_CANONICAL_PROVIDERS = CANONICAL_PROVIDERS
+CANONICAL_PROVIDERS = [
+    ProviderEntry(
+        CPA_CANONICAL_PROVIDER,
+        "CLIProxyAPI",
+        "CLIProxyAPI / CPA (唯一模型入口；上游渠道在 CPA WebUI 管理)",
+    ),
+]
 _PROVIDER_LABELS = {p.slug: p.label for p in CANONICAL_PROVIDERS}
-_PROVIDER_LABELS["custom"] = "Custom endpoint"  # special case: not a named provider
+_PROVIDER_LABELS["cpa"] = "CLIProxyAPI"
 
 
 _PROVIDER_ALIASES = {
@@ -1755,6 +1768,19 @@ def list_available_providers() -> list[dict[str, str]]:
     Main inference remains CPA-only; this list does not imply runtime provider
     switching support.
     """
+    try:
+        from hermes_cli.auth import get_auth_status
+        status = get_auth_status(CPA_CANONICAL_PROVIDER)
+        has_creds = bool(status.get("logged_in") or status.get("configured"))
+    except Exception:
+        has_creds = False
+    return [{
+        "id": CPA_CANONICAL_PROVIDER,
+        "label": "CLIProxyAPI",
+        "aliases": ["cpa", "cliproxy", "cli-proxy-api"],
+        "authenticated": has_creds,
+    }]
+
     # Derive display order from canonical list + custom
     provider_order = [p.slug for p in CANONICAL_PROVIDERS] + ["custom"]
 
@@ -2028,18 +2054,22 @@ def normalize_provider(provider: Optional[str]) -> str:
     ``hermes_cli.auth.resolve_provider()`` to resolve it to a concrete
     provider based on credentials and environment.
     """
-    normalized = (provider or "openrouter").strip().lower()
+    normalized = (provider or CPA_CANONICAL_PROVIDER).strip().lower()
+    if is_cpa_provider(normalized):
+        return CPA_CANONICAL_PROVIDER
     return _PROVIDER_ALIASES.get(normalized, normalized)
 
 
 def provider_label(provider: Optional[str]) -> str:
     """Return a human-friendly label for a provider id or alias."""
-    original = (provider or "openrouter").strip()
+    original = (provider or CPA_CANONICAL_PROVIDER).strip()
     normalized = original.lower()
     if normalized == "auto":
-        return "Auto"
+        return CPA_DISPLAY_NAME
     normalized = normalize_provider(normalized)
-    return _PROVIDER_LABELS.get(normalized, original or "OpenRouter")
+    if not is_cpa_provider(normalized):
+        return CPA_DISPLAY_NAME
+    return _PROVIDER_LABELS.get(normalized, original or CPA_DISPLAY_NAME)
 
 
 # Models that support OpenAI Priority Processing (service_tier="priority").
@@ -2261,6 +2291,8 @@ def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) 
     on the platform appear in ``/model`` without a Hermes release.
     """
     normalized = normalize_provider(provider)
+    if not is_cpa_provider(normalized):
+        return []
     if normalized == "openrouter":
         return model_ids(force_refresh=force_refresh)
     if normalized == "openai-codex":
