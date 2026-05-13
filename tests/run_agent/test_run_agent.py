@@ -85,7 +85,7 @@ def agent():
     ):
         a = AIAgent(
             api_key="test-key-1234567890",
-            base_url="https://openrouter.ai/api/v1",
+            base_url="http://127.0.0.1:8080/v1",
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,
@@ -107,7 +107,7 @@ def agent_with_memory_tool():
     ):
         a = AIAgent(
             api_key="test-k...7890",
-            base_url="https://openrouter.ai/api/v1",
+            base_url="http://127.0.0.1:8080/v1",
             quiet_mode=True,
             skip_context_files=True,
             skip_memory=True,
@@ -144,14 +144,14 @@ def test_aiagent_reuses_existing_errors_log_handler():
         ):
             AIAgent(
                 api_key="test-k...7890",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
             )
             AIAgent(
                 api_key="test-k...7890",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
@@ -173,7 +173,7 @@ def test_aiagent_reuses_existing_errors_log_handler():
 
 
 class TestProviderModelNormalization:
-    def test_aiagent_strips_matching_native_provider_prefix(self):
+    def test_aiagent_ignores_legacy_provider_base_url(self):
         with (
             patch(
                 "run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")
@@ -191,9 +191,10 @@ class TestProviderModelNormalization:
                 skip_memory=True,
             )
 
-        assert agent.model == "glm-5.1"
+        assert agent.base_url == "http://127.0.0.1:8080/v1"
+        assert agent.model == "zai/glm-5.1"
 
-    def test_aiagent_keeps_aggregator_vendor_slug(self):
+    def test_aiagent_keeps_cpa_model_slug(self):
         with (
             patch(
                 "run_agent.get_tool_definitions", return_value=_make_tool_defs("web_search")
@@ -203,8 +204,8 @@ class TestProviderModelNormalization:
         ):
             agent = AIAgent(
                 model="anthropic/claude-sonnet-4.6",
-                provider="openrouter",
-                base_url="https://openrouter.ai/api/v1",
+                provider="cliproxyapi",
+                base_url="http://127.0.0.1:8080/v1",
                 api_key="test-key-1234567890",
                 quiet_mode=True,
                 skip_context_files=True,
@@ -648,7 +649,7 @@ class TestInit:
             a = AIAgent(
                 api_key="test-k...7890",
                 model="anthropic/claude-sonnet-4-20250514",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
@@ -664,7 +665,7 @@ class TestInit:
         ):
             a = AIAgent(
                 api_key="test-key-1234567890",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 model="openai/gpt-4o",
                 quiet_mode=True,
                 skip_context_files=True,
@@ -717,7 +718,7 @@ class TestInit:
             a = AIAgent(
                 api_key="test-k...7890",
                 model="anthropic/claude-sonnet-4-20250514",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
@@ -738,7 +739,7 @@ class TestInit:
             a = AIAgent(
                 api_key="test-k...7890",
                 model="anthropic/claude-sonnet-4-20250514",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
@@ -759,7 +760,7 @@ class TestInit:
             a = AIAgent(
                 api_key="test-k...7890",
                 model="anthropic/claude-sonnet-4-20250514",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
@@ -776,7 +777,7 @@ class TestInit:
         ):
             a = AIAgent(
                 api_key="test-key-1234567890",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
@@ -792,7 +793,7 @@ class TestInit:
         ):
             a = AIAgent(
                 api_key="test-key-1234567890",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
@@ -892,7 +893,7 @@ class TestBuildSystemPrompt:
         ):
             agent = AIAgent(
                 api_key="test-k...7890",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 quiet_mode=True,
                 skip_context_files=True,
                 load_soul_identity=True,
@@ -950,7 +951,7 @@ class TestBuildSystemPrompt:
         ):
             agent = AIAgent(
                 api_key="test-k...7890",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
@@ -983,7 +984,7 @@ class TestToolUseEnforcementConfig:
             a = AIAgent(
                 model=model,
                 api_key="test-key-1234567890",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
@@ -1080,7 +1081,7 @@ class TestToolUseEnforcementConfig:
         ):
             a = AIAgent(
                 api_key="test-key-1234567890",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 quiet_mode=True,
                 skip_context_files=True,
                 skip_memory=True,
@@ -4063,7 +4064,7 @@ class TestAnthropicCredentialRefresh:
             mock_build.side_effect = [old_client, new_client]
             agent = AIAgent(
                 api_key="sk-ant-oat01-stale-token",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 api_mode="anthropic_messages",
                 quiet_mode=True,
                 skip_context_files=True,
@@ -4096,7 +4097,7 @@ class TestAnthropicCredentialRefresh:
         ):
             agent = AIAgent(
                 api_key="sk-ant-oat01-same-token",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 api_mode="anthropic_messages",
                 quiet_mode=True,
                 skip_context_files=True,
@@ -4124,7 +4125,7 @@ class TestAnthropicCredentialRefresh:
         ):
             agent = AIAgent(
                 api_key="sk-ant-oat01-current-token",
-                base_url="https://openrouter.ai/api/v1",
+                base_url="http://127.0.0.1:8080/v1",
                 api_mode="anthropic_messages",
                 quiet_mode=True,
                 skip_context_files=True,

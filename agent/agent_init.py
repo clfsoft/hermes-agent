@@ -7,6 +7,7 @@ import re
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
