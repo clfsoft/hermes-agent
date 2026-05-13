@@ -48,6 +48,12 @@ def _make_mock_server(name, session=None, tools=None):
     return server
 
 
+def test_is_session_expired_detects_session_terminated():
+    from tools.mcp_tool import _is_session_expired_error
+
+    assert _is_session_expired_error(RuntimeError("Session terminated")) is True
+
+
 # ---------------------------------------------------------------------------
 # Config loading
 # ---------------------------------------------------------------------------

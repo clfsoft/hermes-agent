@@ -3,7 +3,11 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from agent.context_compressor import ContextCompressor, SUMMARY_PREFIX
+from agent.context_compressor import (
+    ContextCompressor,
+    SUMMARY_PREFIX,
+    _COMPRESSION_NOTE_SENTINEL,
+)
 
 
 @pytest.fixture()
@@ -171,6 +175,48 @@ class TestNonStringContent:
         # None content → empty string → standardized compaction handoff prefix added
         assert summary is not None
         assert summary == SUMMARY_PREFIX
+
+    def test_string_message_coerced_to_summary_content(self):
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message = "plain summary text"
+
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+
+        messages = [
+            {"role": "user", "content": "do something"},
+            {"role": "assistant", "content": "ok"},
+        ]
+
+        with patch("agent.context_compressor.call_llm", return_value=mock_response):
+            summary = c._generate_summary(messages)
+
+        assert summary == f"{SUMMARY_PREFIX}\nplain summary text"
+
+
+class TestRecompactionDetection:
+    def test_system_prompt_with_compaction_note_is_recompaction(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+
+        messages = [
+            {
+                "role": "system",
+                "content": f"You are Hermes. {_COMPRESSION_NOTE_SENTINEL}.",
+            },
+            {"role": "user", "content": "old request"},
+        ]
+
+        assert c._is_recompaction(messages) is True
+
+    def test_non_system_note_is_not_recompaction(self):
+        with patch("agent.context_compressor.get_model_context_length", return_value=100000):
+            c = ContextCompressor(model="test", quiet_mode=True)
+
+        messages = [{"role": "user", "content": _COMPRESSION_NOTE_SENTINEL}]
+
+        assert c._is_recompaction(messages) is False
 
     def test_summary_call_does_not_force_temperature(self):
         mock_response = MagicMock()
