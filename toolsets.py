@@ -26,46 +26,76 @@ Usage:
 from typing import List, Dict, Any, Set, Optional
 
 
-# Shared tool list for CLI and all messaging platform toolsets.
-# Edit this once to update all platforms simultaneously.
-_HERMES_CORE_TOOLS = [
-    # Web
+_TIER_CORE_TOOLS = [
     "web_search", "web_extract",
-    # Terminal + process management
     "terminal", "process",
-    # File manipulation
     "read_file", "write_file", "patch", "search_files",
-    # Vision + image generation
+]
+
+_TIER_META_TOOLS = [
+    "skills_list", "skill_view",
+    "todo", "memory",
+    "session_search",
+    "clarify",
+]
+
+_TIER_HEAVY_TOOLS = [
     "minimax_vision_analyze", "vision_analyze", "image_generate",
-    # Skills
-    "skills_list", "skill_view", "skill_manage",
-    # Browser automation
+    "skill_manage",
     "browser_navigate", "browser_snapshot", "browser_click",
     "browser_type", "browser_scroll", "browser_back",
     "browser_press", "browser_get_images",
     "browser_vision", "browser_console",
-    # Text-to-speech
     "text_to_speech",
-    # Planning & memory
-    "todo", "memory",
-    # Session history search
-    "session_search",
-    # Clarifying questions
-    "clarify",
-    # Code execution + delegation
     "execute_code", "delegate_task",
-    # Cronjob management
     "cronjob",
-    # Cross-platform messaging (gated on gateway running via check_fn)
     "send_message",
-    # Home Assistant smart home control (gated on HASS_TOKEN via check_fn)
     "ha_list_entities", "ha_get_state", "ha_list_services", "ha_call_service",
 ]
+
+_TOOL_TIER_MAP: Dict[str, str] = {}
+for _t in _TIER_CORE_TOOLS:
+    _TOOL_TIER_MAP[_t] = "core"
+for _t in _TIER_META_TOOLS:
+    _TOOL_TIER_MAP[_t] = "meta"
+for _t in _TIER_HEAVY_TOOLS:
+    _TOOL_TIER_MAP[_t] = "heavy"
+
+
+def get_tool_tier(tool_name: str) -> str:
+    return _TOOL_TIER_MAP.get(tool_name, "heavy")
+
+
+def tools_for_complexity(complexity: str, full_tool_names: List[str]) -> List[str]:
+    if complexity == "simple":
+        allowed = set(_TIER_CORE_TOOLS)
+    elif complexity == "general":
+        allowed = set(_TIER_CORE_TOOLS) | set(_TIER_META_TOOLS)
+    else:
+        return list(full_tool_names)
+    return [t for t in full_tool_names if t in allowed]
+
+
+# Shared tool list for CLI and all messaging platform toolsets.
+# Edit this once to update all platforms simultaneously.
+_HERMES_CORE_TOOLS = _TIER_CORE_TOOLS + _TIER_META_TOOLS + _TIER_HEAVY_TOOLS
 
 
 # Core toolset definitions
 # These can include individual tools or reference other toolsets
 TOOLSETS = {
+    "core": {
+        "description": "Core tools always available — web search, terminal, file ops",
+        "tools": list(_TIER_CORE_TOOLS),
+        "includes": []
+    },
+
+    "meta": {
+        "description": "Planning and metadata tools — skills, todo, memory, session search, clarify",
+        "tools": list(_TIER_META_TOOLS),
+        "includes": []
+    },
+
     # Basic toolsets - individual tool categories
     "web": {
         "description": "Web research and content extraction tools",

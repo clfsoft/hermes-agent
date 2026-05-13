@@ -114,7 +114,7 @@ def test_resolve_turn_route_marks_non_simple_primary_turn_as_heavy():
     assert result["signature"][-1] == "heavy"
 
 
-def test_resolve_turn_route_marks_general_turn_as_light():
+def test_resolve_turn_route_marks_general_turn_as_medium():
     from agent.smart_model_routing import resolve_turn_route
 
     result = resolve_turn_route(
@@ -130,8 +130,8 @@ def test_resolve_turn_route_marks_general_turn_as_light():
     )
 
     assert result["turn_complexity"] == "general"
-    assert result["task_mode"] == "light"
-    assert result["signature"][-1] == "light"
+    assert result["task_mode"] == "medium"
+    assert result["signature"][-1] == "medium"
 
 
 def test_resolve_turn_toolsets_light_turn_disables_all_tools():
@@ -140,6 +140,18 @@ def test_resolve_turn_toolsets_light_turn_disables_all_tools():
 
 def test_resolve_turn_toolsets_heavy_turn_grants_all_tools():
     assert resolve_turn_toolsets({"task_mode": "heavy"}, ["core"]) == ["all"]
+
+
+def test_resolve_turn_toolsets_medium_turn_returns_core_meta():
+    assert resolve_turn_toolsets({"task_mode": "medium"}, ["all"]) == ["core", "meta"]
+
+
+def test_resolve_turn_toolsets_inherit_keeps_default():
+    assert resolve_turn_toolsets({"task_mode": "inherit"}, ["web", "terminal"]) == ["web", "terminal"]
+
+
+def test_resolve_turn_toolsets_inherit_none_default():
+    assert resolve_turn_toolsets({"task_mode": "inherit"}, None) is None
 
 
 def test_force_light_contains_overrides_other_complexity_signals(monkeypatch):

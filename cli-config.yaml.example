@@ -78,9 +78,9 @@ dashboard:
 #   force_light_contains: ["现在几点", "今天天气"]
 #   force_heavy_contains: ["debug", "patch", "terminal", "MCP"]
 #   route_modes:
-#     simple: light
-#     general: light
-#     complex: heavy
+#     simple: light      # no tools at all
+#     general: medium    # core + meta tools only (saves ~60% tool tokens)
+#     complex: heavy     # full tool access
 #   cheap_model:
 #     provider: openrouter
 #     model: google/gemini-2.5-flash

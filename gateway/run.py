@@ -11406,7 +11406,7 @@ class GatewayRunner:
             _sig = self._agent_config_signature(
                 turn_route["model"],
                 turn_route["runtime"],
-                enabled_toolsets,
+                turn_toolsets,
                 combined_ephemeral,
                 cache_keys=self._extract_cache_busting_config(user_config),
             )

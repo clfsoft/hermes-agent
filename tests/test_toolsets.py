@@ -12,6 +12,11 @@ from toolsets import (
     validate_toolset,
     create_custom_toolset,
     get_toolset_info,
+    _TIER_CORE_TOOLS,
+    _TIER_META_TOOLS,
+    _TIER_HEAVY_TOOLS,
+    get_tool_tier,
+    tools_for_complexity,
 )
 
 
@@ -138,6 +143,74 @@ class TestToolsetConsistency:
         """All hermes-* platform toolsets should have the same tools."""
         platforms = ["hermes-cli", "hermes-telegram", "hermes-discord", "hermes-whatsapp", "hermes-slack", "hermes-signal", "hermes-homeassistant"]
         tool_sets = [set(TOOLSETS[p]["tools"]) for p in platforms]
-        # All platform toolsets should be identical
         for ts in tool_sets[1:]:
             assert ts == tool_sets[0]
+
+
+class TestToolTiers:
+    def test_core_tier_has_essential_tools(self):
+        assert "web_search" in _TIER_CORE_TOOLS
+        assert "terminal" in _TIER_CORE_TOOLS
+        assert "read_file" in _TIER_CORE_TOOLS
+        assert "write_file" in _TIER_CORE_TOOLS
+
+    def test_meta_tier_has_planning_tools(self):
+        assert "todo" in _TIER_META_TOOLS
+        assert "memory" in _TIER_META_TOOLS
+        assert "clarify" in _TIER_META_TOOLS
+
+    def test_heavy_tier_has_expensive_tools(self):
+        assert "browser_navigate" in _TIER_HEAVY_TOOLS
+        assert "vision_analyze" in _TIER_HEAVY_TOOLS
+        assert "image_generate" in _TIER_HEAVY_TOOLS
+        assert "execute_code" in _TIER_HEAVY_TOOLS
+
+    def test_tiers_are_disjoint(self):
+        core = set(_TIER_CORE_TOOLS)
+        meta = set(_TIER_META_TOOLS)
+        heavy = set(_TIER_HEAVY_TOOLS)
+        assert core & meta == set()
+        assert core & heavy == set()
+        assert meta & heavy == set()
+
+    def test_tiers_cover_all_core_tools(self):
+        all_tiered = set(_TIER_CORE_TOOLS) | set(_TIER_META_TOOLS) | set(_TIER_HEAVY_TOOLS)
+        from toolsets import _HERMES_CORE_TOOLS
+        assert all_tiered == set(_HERMES_CORE_TOOLS)
+
+    def test_get_tool_tier(self):
+        assert get_tool_tier("web_search") == "core"
+        assert get_tool_tier("todo") == "meta"
+        assert get_tool_tier("browser_navigate") == "heavy"
+        assert get_tool_tier("unknown_tool_xyz") == "heavy"
+
+    def test_tools_for_complexity_simple(self):
+        full = list(_TIER_CORE_TOOLS) + list(_TIER_META_TOOLS) + list(_TIER_HEAVY_TOOLS)
+        result = tools_for_complexity("simple", full)
+        assert set(result) == set(_TIER_CORE_TOOLS)
+
+    def test_tools_for_complexity_general(self):
+        full = list(_TIER_CORE_TOOLS) + list(_TIER_META_TOOLS) + list(_TIER_HEAVY_TOOLS)
+        result = tools_for_complexity("general", full)
+        assert set(result) == set(_TIER_CORE_TOOLS) | set(_TIER_META_TOOLS)
+
+    def test_tools_for_complexity_complex(self):
+        full = list(_TIER_CORE_TOOLS) + list(_TIER_META_TOOLS) + list(_TIER_HEAVY_TOOLS)
+        result = tools_for_complexity("complex", full)
+        assert set(result) == set(full)
+
+    def test_core_toolset_resolves(self):
+        tools = resolve_toolset("core")
+        assert set(tools) == set(_TIER_CORE_TOOLS)
+
+    def test_meta_toolset_resolves(self):
+        tools = resolve_toolset("meta")
+        assert set(tools) == set(_TIER_META_TOOLS)
+
+    def test_core_plus_meta_resolves(self):
+        tools = resolve_multiple_toolsets(["core", "meta"])
+        assert set(tools) == set(_TIER_CORE_TOOLS) | set(_TIER_META_TOOLS)
+
+    def test_core_and_meta_toolsets_valid(self):
+        assert validate_toolset("core") is True
+        assert validate_toolset("meta") is True
