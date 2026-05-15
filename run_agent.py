@@ -10956,8 +10956,10 @@ class AIAgent:
                     # maximum") or any other provider that complains about
                     # image size.  If shrink fails or a second attempt still
                     # fails, fall through to normal error handling.
+                    image_too_large_reason = getattr(FailoverReason, "image_too_large", None)
                     if (
-                        classified.reason == FailoverReason.image_too_large
+                        image_too_large_reason is not None
+                        and classified.reason == image_too_large_reason
                         and not image_shrink_retry_attempted
                     ):
                         image_shrink_retry_attempted = True

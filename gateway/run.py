@@ -12106,6 +12106,8 @@ class GatewayRunner:
 
         _notify_task = asyncio.create_task(_notify_long_running())
 
+        result = None
+
         try:
             # Run in thread pool to not block.  Use an *inactivity*-based
             # timeout instead of a wall-clock limit: the agent can run for
@@ -12280,6 +12282,7 @@ class GatewayRunner:
                     "history_offset": 0,
                     "failed": True,
                 }
+                result_holder[0] = response
 
             # Track fallback model state: if the agent switched to a
             # fallback model during this run, persist it so /model shows

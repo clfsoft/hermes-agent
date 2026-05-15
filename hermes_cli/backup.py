@@ -8,7 +8,10 @@ Backup and import commands for hermes CLI.
 HERMES_HOME root.
 """
 
+import json
 import os
+import shutil
+import sqlite3
 import sys
 import time
 import zipfile
@@ -28,12 +31,18 @@ _EXCLUDED_DIRS = {
     "__pycache__",      # bytecode caches — regenerated on import
     ".git",             # nested git dirs (profiles shouldn't have these, but safety)
     "node_modules",     # js deps if website/ somehow leaks in
+    "backups",          # backup archives must not recursively include backups
+    "checkpoints",      # session-local trajectory cache
+    "state-snapshots",  # quick restore points are regenerated separately
 }
 
 # File-name suffixes to skip
 _EXCLUDED_SUFFIXES = (
     ".pyc",
     ".pyo",
+    ".db-wal",
+    ".db-shm",
+    ".db-journal",
 )
 
 # File names to skip (runtime state that's meaningless on another machine)
@@ -74,6 +83,74 @@ def _format_size(nbytes: int) -> str:
             return f"{nbytes:.1f} {unit}" if unit != "B" else f"{nbytes} {unit}"
         nbytes /= 1024
     return f"{nbytes:.1f} TB"
+
+
+def _iter_backup_files(hermes_root: Path, out_path: Path | None = None) -> tuple[list[tuple[Path, Path]], set[str]]:
+    """Collect files for a full zip backup using shared exclusion rules."""
+    files_to_add: list[tuple[Path, Path]] = []
+    skipped_dirs: set[str] = set()
+
+    for dirpath, dirnames, filenames in os.walk(hermes_root, followlinks=False):
+        dp = Path(dirpath)
+        rel_dir = dp.relative_to(hermes_root)
+
+        orig_dirnames = dirnames[:]
+        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIRS]
+        for removed in set(orig_dirnames) - set(dirnames):
+            skipped_dirs.add(str(rel_dir / removed))
+
+        for fname in filenames:
+            fpath = dp / fname
+            rel = fpath.relative_to(hermes_root)
+
+            if _should_exclude(rel):
+                continue
+
+            if out_path is not None:
+                try:
+                    if fpath.resolve() == out_path.resolve():
+                        continue
+                except (OSError, ValueError):
+                    pass
+
+            files_to_add.append((fpath, rel))
+
+    return files_to_add, skipped_dirs
+
+
+def _write_backup_zip(hermes_root: Path, out_path: Path) -> tuple[int, int]:
+    """Write a Hermes backup zip and return ``(file_count, total_bytes)``."""
+    files_to_add, _skipped_dirs = _iter_backup_files(hermes_root, out_path)
+    total_bytes = 0
+
+    with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+        for abs_path, rel_path in files_to_add:
+            try:
+                zf.write(abs_path, arcname=str(rel_path))
+                total_bytes += abs_path.stat().st_size
+            except (PermissionError, OSError, ValueError):
+                continue
+
+    return len(files_to_add), total_bytes
+
+
+def _rotate_backups(backups_dir: Path, pattern: str, keep: int) -> int:
+    """Delete older matching backup files, preserving unrelated files."""
+    if keep <= 0:
+        keep = 1
+    entries = sorted(
+        backups_dir.glob(pattern),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    deleted = 0
+    for old in entries[keep:]:
+        try:
+            old.unlink()
+            deleted += 1
+        except OSError:
+            pass
+    return deleted
 
 
 def run_backup(args) -> None:
@@ -153,7 +230,7 @@ def run_backup(args) -> None:
             try:
                 zf.write(abs_path, arcname=str(rel_path))
                 total_bytes += abs_path.stat().st_size
-            except (PermissionError, OSError) as exc:
+            except (PermissionError, OSError, ValueError) as exc:
                 errors.append(f"  {rel_path}: {exc}")
                 continue
 
@@ -185,6 +262,275 @@ def run_backup(args) -> None:
             print(f"  ... and {len(errors) - 10} more")
 
     print(f"\nRestore with: hermes import {out_path.name}")
+
+
+# ---------------------------------------------------------------------------
+# Quick snapshots and automated backup helpers
+# ---------------------------------------------------------------------------
+
+_QUICK_DEFAULT_KEEP = 20
+
+_QUICK_PATHS = (
+    "config.yaml",
+    ".env",
+    "auth.json",
+    "state.db",
+    "hermes_state.db",
+    "memory_store.db",
+    "gateway_state.json",
+    "cron/jobs.json",
+    "platforms/pairing",
+    "pairing",
+    "feishu_comment_pairing.json",
+)
+
+
+def _snapshot_root(hermes_home: Path) -> Path:
+    return hermes_home / "state-snapshots"
+
+
+def _safe_copy_db(src: Path, dst: Path) -> bool:
+    """Copy a SQLite database using the backup API so WAL state is included."""
+    try:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        src_conn = sqlite3.connect(str(src))
+        try:
+            dst_conn = sqlite3.connect(str(dst))
+            try:
+                src_conn.backup(dst_conn)
+            finally:
+                dst_conn.close()
+        finally:
+            src_conn.close()
+        return True
+    except sqlite3.Error:
+        try:
+            if dst.exists():
+                dst.unlink()
+        except OSError:
+            pass
+        return False
+
+
+def _copy_snapshot_file(src: Path, dst: Path) -> bool:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if src.suffix == ".db":
+        if _safe_copy_db(src, dst):
+            return True
+    try:
+        shutil.copy2(src, dst)
+        return True
+    except OSError:
+        return False
+
+
+def _iter_quick_snapshot_sources(hermes_home: Path) -> list[tuple[Path, Path]]:
+    sources: list[tuple[Path, Path]] = []
+    for rel_name in _QUICK_PATHS:
+        src = hermes_home / rel_name
+        if not src.exists():
+            continue
+        if src.is_file():
+            rel = src.relative_to(hermes_home)
+            if not _should_exclude(rel):
+                sources.append((src, rel))
+            continue
+        for child in src.rglob("*"):
+            if not child.is_file():
+                continue
+            rel = child.relative_to(hermes_home)
+            if not _should_exclude(rel):
+                sources.append((child, rel))
+    return sources
+
+
+def _sanitize_label(label: str | None) -> str:
+    if not label:
+        return ""
+    cleaned = "".join(ch.lower() if ch.isalnum() else "-" for ch in label.strip())
+    cleaned = "-".join(part for part in cleaned.split("-") if part)
+    return cleaned[:48]
+
+
+def create_quick_snapshot(
+    label: str | None = None,
+    hermes_home: Path | None = None,
+    keep: int = _QUICK_DEFAULT_KEEP,
+) -> str | None:
+    """Create a small restore point for critical Hermes state files."""
+    home = Path(hermes_home) if hermes_home is not None else get_default_hermes_root()
+    if not home.is_dir():
+        return None
+
+    sources = _iter_quick_snapshot_sources(home)
+    if not sources:
+        return None
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    suffix = _sanitize_label(label)
+    snap_id = f"{stamp}-{suffix}" if suffix else stamp
+    snap_dir = _snapshot_root(home) / snap_id
+    snap_dir.mkdir(parents=True, exist_ok=False)
+
+    files: list[str] = []
+    total_bytes = 0
+    for src, rel in sources:
+        dst = snap_dir / rel
+        if _copy_snapshot_file(src, dst):
+            rel_posix = rel.as_posix()
+            files.append(rel_posix)
+            try:
+                total_bytes += src.stat().st_size
+            except OSError:
+                pass
+
+    if not files:
+        shutil.rmtree(snap_dir, ignore_errors=True)
+        return None
+
+    manifest = {
+        "id": snap_id,
+        "label": suffix,
+        "created_at": time.time(),
+        "files": sorted(files),
+        "total_bytes": total_bytes,
+    }
+    (snap_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    prune_quick_snapshots(keep=keep, hermes_home=home)
+    return snap_id
+
+
+def list_quick_snapshots(limit: int | None = None, hermes_home: Path | None = None) -> list[dict]:
+    home = Path(hermes_home) if hermes_home is not None else get_default_hermes_root()
+    root = _snapshot_root(home)
+    if not root.is_dir():
+        return []
+
+    snapshots: list[dict] = []
+    for snap_dir in root.iterdir():
+        if not snap_dir.is_dir():
+            continue
+        manifest_path = snap_dir / "manifest.json"
+        if manifest_path.exists():
+            try:
+                meta = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                meta = {}
+        else:
+            meta = {}
+        meta.setdefault("id", snap_dir.name)
+        meta.setdefault("created_at", snap_dir.stat().st_mtime)
+        meta["path"] = str(snap_dir)
+        snapshots.append(meta)
+
+    snapshots.sort(key=lambda item: item.get("created_at", 0), reverse=True)
+    if limit is not None:
+        return snapshots[:limit]
+    return snapshots
+
+
+def prune_quick_snapshots(
+    keep: int = _QUICK_DEFAULT_KEEP,
+    hermes_home: Path | None = None,
+) -> int:
+    home = Path(hermes_home) if hermes_home is not None else get_default_hermes_root()
+    root = _snapshot_root(home)
+    if not root.is_dir():
+        return 0
+    if keep <= 0:
+        keep = 1
+
+    snapshots = list_quick_snapshots(limit=None, hermes_home=home)
+    deleted = 0
+    for snap in snapshots[keep:]:
+        path = Path(snap["path"])
+        try:
+            shutil.rmtree(path)
+            deleted += 1
+        except OSError:
+            pass
+    return deleted
+
+
+def restore_quick_snapshot(snap_id: str, hermes_home: Path | None = None) -> bool:
+    home = Path(hermes_home) if hermes_home is not None else get_default_hermes_root()
+    snap_dir = _snapshot_root(home) / snap_id
+    manifest_path = snap_dir / "manifest.json"
+    if not manifest_path.is_file():
+        return False
+
+    try:
+        meta = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    restored = 0
+    for rel_name in meta.get("files", []):
+        rel = Path(rel_name)
+        src = snap_dir / rel
+        dst = home / rel
+        try:
+            dst.resolve().relative_to(home.resolve())
+        except ValueError:
+            continue
+        if src.is_file():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            restored += 1
+
+    return restored > 0
+
+
+def run_quick_backup(args) -> None:
+    """CLI entry point for ``hermes backup --quick``."""
+    snap_id = create_quick_snapshot(label=getattr(args, "label", None))
+    if not snap_id:
+        print("No critical state files found to snapshot.")
+        return
+    snap_dir = _snapshot_root(get_default_hermes_root()) / snap_id
+    print(f"Quick backup complete: {snap_dir}")
+    print(f"Snapshot ID: {snap_id}")
+
+
+def _create_rotated_backup(
+    prefix: str,
+    *,
+    hermes_home: Path | None = None,
+    keep: int = 5,
+) -> Path | None:
+    home = Path(hermes_home) if hermes_home is not None else get_default_hermes_root()
+    if not home.is_dir():
+        return None
+
+    backups_dir = home / "backups"
+    backups_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S-%f")
+    out_path = backups_dir / f"{prefix}-{stamp}.zip"
+    _write_backup_zip(home, out_path)
+    _rotate_backups(backups_dir, f"{prefix}-*.zip", keep)
+    return out_path
+
+
+def create_pre_update_backup(
+    *,
+    hermes_home: Path | None = None,
+    keep: int = 5,
+) -> Path | None:
+    """Create the zip backup used by ``hermes update --backup``."""
+    return _create_rotated_backup("pre-update", hermes_home=hermes_home, keep=keep)
+
+
+def create_pre_migration_backup(
+    *,
+    hermes_home: Path | None = None,
+    keep: int = 5,
+) -> Path | None:
+    """Create the zip backup used before migration commands mutate state."""
+    return _create_rotated_backup("pre-migration", hermes_home=hermes_home, keep=keep)
 
 
 # ---------------------------------------------------------------------------
